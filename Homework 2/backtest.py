@@ -248,7 +248,33 @@ def estimate_hedge_ratio(prices: pd.DataFrame, pairs: pd.DataFrame, config: dict
         Dataframe with betas and cointegration information for each pair
     """
     # Your code here
-    pass
+    idxs, hedge_ratios, adf_stats, adf_pvalues, is_cointegrated = [], [], [], [], []
+    returns = prices.pct_change().dropna()
+    for idx, (s1, s2, _) in pairs.iterrows():
+        s1_price, s2_price = prices.loc[:, s1], prices.loc[:, s2]
+        if config['HEDGE_RATIO_METHOD'] == 'unit':
+            hedge_ratio = 1.0
+        elif config['HEDGE_RATIO_METHOD'] == 'ols':
+            hedge_ratio = sm.OLS(s2_price, s1_price).fit().params.iloc[0]
+        elif config['HEDGE_RATIO_METHOD'] == 'tls':
+            r1, r2 = returns.loc[:, s1], returns.loc[:, s2]
+            r1_var, r2_var, r1r2_cov = r1.var(), r2.var(), np.cov(r1, r2)[0,1]
+            hedge_ratio = (r2_var - r1_var + np.sqrt((r2_var - r1_var)**2 + 4*r1r2_cov**2)) / (2*r1r2_cov)
+        hedge_ratios.append(hedge_ratio)
+        spread = s2_price - hedge_ratio*s1_price
+        adf_test = ADF(spread)
+        adf_stats.append(adf_test.stat)
+        adf_pvalues.append(adf_test.pvalue)
+        is_cointegrated.append(adf_test.pvalue < config['COINT_THRESHOLD'])
+        idxs.append(idx) # not strictly necessary, but more robust to have the same idx since we merge on idx
+    concat_df = pd.DataFrame(
+        data=np.array([hedge_ratios, adf_stats, adf_pvalues, is_cointegrated]).T,
+        columns=['hedge_ratio', 'adf_stat', 'adf_pvalue', 'is_cointegrated'],
+        index = idxs
+    )
+    return_df = pd.merge(pairs, concat_df, left_index=True, right_index=True)
+    return_df = return_df.loc[return_df['is_cointegrated'] == 1, :].reset_index(drop=True)
+    return return_df
     # e.g. return results
 
 
@@ -271,7 +297,81 @@ def compute_signal(prices: pd.DataFrame, hedge_ratios: pd.DataFrame, config: dic
         Dictionary with signals for each pair
     """
     # Your code here
-    pass
+    signals = {}
+    for _, row in hedge_ratios.iterrows():
+        s1 = row["stock1"]
+        s2 = row["stock2"]
+        hr = row["hedge_ratio"]
+
+        price1 = prices.loc[:, s1]
+        price2 = prices.loc[:, s2]
+
+        spread = price2 - hr * price1
+
+        window_size = config["ESTIMATION_PERIOD"]
+        rolling_mean = spread.rolling(window = window_size).mean()
+        rolling_stdev = spread.rolling(window = window_size).std()
+
+        rolling_z = (spread - rolling_mean) / rolling_stdev
+
+        norm_p1 = price1 / price1.iloc[0]
+        norm_p2 = price2 / price2.iloc[0]
+
+        signal = pd.Series(0, index = prices.index, dtype = int)
+        trade = False
+        entry_signal = 0
+        p2_higher = None
+
+        for t in range(len(prices)):
+            z = rolling_z.iloc[t]
+
+            if not trade:
+                if pd.isna(z):
+                    signal.iloc[t] = 0 
+                elif z < -config["Z_THRESHOLD"]:
+                    trade = True
+                    entry_signal = 1
+                    if norm_p2.iloc[t] > norm_p1.iloc[t]:
+                        p2_higher = True
+                    else:
+                        p2_higher = False
+                    signal.iloc[t] = 1
+                elif z > config["Z_THRESHOLD"]:
+                    trade = True
+                    entry_signal = -1
+                    if norm_p2.iloc[t] > norm_p1.iloc[t]:
+                        p2_higher = True
+                    else:
+                        p2_higher = False
+                    signal.iloc[t] = -1
+                
+                else:
+                    signal.iloc[t] = 0
+            
+            else:
+                signal.iloc[t] = entry_signal
+
+                if p2_higher and norm_p2.iloc[t] <= norm_p1.iloc[t]:
+                    trade = False
+                    entry_signal = 0
+                    p2_higher = None
+                    signal.iloc[t] = 0
+                elif not p2_higher and norm_p2.iloc[t] >= norm_p1.iloc[t]:
+                    trade = False
+                    entry_signal = 0
+                    p2_higher = None
+                    signal.iloc[t] = 0
+
+        signals[f"{s1}_{s2}"] = {
+            "stock1": s1,
+            "stock2": s2,
+            "hedge_ratio": hr,
+            "signal": signal,
+            "z_score": rolling_z
+        }
+
+    return signals
+
     # e.g. return signals
 
 
