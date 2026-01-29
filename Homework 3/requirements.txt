@@ -1,0 +1,17 @@
+numpy>=1.26.4,<2
+pandas>=2.2.3
+openpyxl>=3.1.5
+scipy>=1.13.0
+scikit-learn>=1.5.2
+seaborn>=0.13.2
+matplotlib>=3.8.4
+statsmodels>=0.14.2
+plotly>=6.0.1
+rpy2>=3.5.17
+jupyter>=1.1.1
+ipykernel>=6.29.4
+jupyterlab>=4.4.0
+ipypublish>=0.10.2
+pyyaml>=6.0.2
+petname>=2.6.0
+arch @ git+https://github.com/bashtage/arch.git@v7.2.0
