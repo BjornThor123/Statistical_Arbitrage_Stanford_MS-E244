@@ -557,7 +557,37 @@ def estimate_ou_parameters(
     x = cumulative_sums.values.T
 
     # ===> YOUR CODE BELOW <===
-    raise NotImplementedError("estimate_ou_parameters not yet implemented")
+    for idx, asset in enumerate(residual_returns.columns):
+        # Avoid using loops?
+        X_t: pd.Series = cumulative_sums[asset]
+
+        X_t_1 = X_t.shift(1)
+
+        mean, var = X_t.mean(), X_t.var()
+
+        mean_1, var_1 = X_t_1.mean(), X_t_1.var()
+
+        cov = X_t.cov(X_t_1)
+
+        b = cov / X_t_1.var()
+        a = mean_1 - b * X_t_1.mean()
+
+        mu = a/(1-b)
+        kappa = -np.log(b)/1 # dt is 1 day?
+        var_zeta = (X_t - a - b * X_t_1).var()
+        sigma = np.sqrt(var_zeta * 2 * kappa / (1 - b**2))
+        var_eq = var_zeta / (1 - b**2)
+
+        r_squared = 1 - (X_t - a - b * X_t_1).var() / X_t.var()
+
+        mask = (b > 0) & (b <= config['B_THRESHOLD']) & (r_squared >= config['R_SQUARED_THRESHOLD'])
+
+        signal = (X_t.iloc[-1] - mu)/np.sqrt(var_eq)
+        
+        if not mask:
+            mu, sigma, kappa, signal = 0, 0, 0, 0
+
+        params[idx, :] = [X_t.iloc[-1], mu, sigma, kappa, r_squared, b, a, mask, signal]
     # ===> YOUR CODE ABOVE <===
 
     result_df = pd.DataFrame(params, columns=variables, index=residual_returns.columns)
