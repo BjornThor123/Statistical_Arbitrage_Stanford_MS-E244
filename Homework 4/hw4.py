@@ -674,7 +674,58 @@ def forecast_residual_returns_ou_signal(
     # For each date in the returns DataFrame
     for i, current_date in enumerate(dates):
         # ===> YOUR CODE BELOW <===
-        raise NotImplementedError("forecast_residual_returns_ou_signal not yet implemented")
+        if i < lookback:
+            continue
+
+        if i + horizon >= len(dates):
+            continue
+        
+
+        current_month = pd.Timestamp(current_date).to_period("M")
+        if last_refit_month is None or current_month != last_refit_month:
+            last_refit_month = current_month
+        
+            X = []
+            y = []
+
+            lb_dates = dates[i - lookback : i]
+
+            for d in lb_dates:
+                signals = signal_values.loc[d]
+                masks = mask_values.loc[d]
+                fut_ret = future_cumul_returns.loc[d]
+
+                for t in residual_returns.columns:
+                    s = signals[t]
+                    m = masks[t]
+                    f = fut_ret[t]
+
+                    if (m == 1) and pd.notna(s) and pd.notna(f):
+                        X.append(s)
+                        y.append(f)
+            
+            if len(X) >= 2: 
+                model = linregress(X, y)
+                beta_1 = model.slope
+                beta_0 = model.intercept
+                r = model.rvalue
+            else:
+                beta_1, beta_0 = np.nan, np.nan
+            
+            beta_coefficients.append({"beta_0" : beta_0, "beta_1" : beta_1})
+            beta_dates.append(current_date)
+
+
+        sig = signal_values.loc[current_date]
+
+        for tick in residual_returns.columns:
+            st = sig[tick]
+
+            if pd.notna(st):
+                forecast = beta_0 + beta_1 * st
+                forecasted_returns.loc[current_date, tick] = forecast
+            else:
+                forecasted_returns.loc[current_date, tick] = np.nan
         # ===> YOUR CODE ABOVE <===
     
     # Create DataFrame of beta coefficients
