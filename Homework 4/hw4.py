@@ -568,23 +568,27 @@ def estimate_ou_parameters(
         mean_1, var_1 = X_t_1.mean(), X_t_1.var()
 
         cov = X_t.cov(X_t_1)
+        var_1 = X_t_1.var()
+        b = cov / var_1 if var_1 > 0 else 0
+        a = mean - b * mean_1  # OLS intercept: a = E[X_t] - b*E[X_{t-1}]
 
-        b = cov / X_t_1.var()
-        a = mean_1 - b * X_t_1.mean()
-
-        mu = a/(1-b)
-        kappa = -np.log(b)/1 # dt is 1 day?
         var_zeta = (X_t - a - b * X_t_1).var()
-        sigma = np.sqrt(var_zeta * 2 * kappa / (1 - b**2))
-        var_eq = var_zeta / (1 - b**2)
+        r_squared = 1 - var_zeta / var if var > 0 else 0
 
-        r_squared = 1 - (X_t - a - b * X_t_1).var() / X_t.var()
+        mask = (
+            (b > 0)
+            & (b <= config['B_THRESHOLD'])
+            & (r_squared >= config['R_SQUARED_THRESHOLD'])
+        )
 
-        mask = (b > 0) & (b <= config['B_THRESHOLD']) & (r_squared >= config['R_SQUARED_THRESHOLD'])
-
-        signal = (X_t.iloc[-1] - mu)/np.sqrt(var_eq)
-        
-        if not mask:
+        # Only compute OU params when b is valid (avoids log(0), sqrt(negative))
+        if mask:
+            mu = a / (1 - b)
+            kappa = -np.log(b)  # dt = 1 day
+            var_eq = var_zeta / (1 - b**2)
+            sigma = np.sqrt(var_eq)  # equilibrium std per docstring
+            signal = (X_t.iloc[-1] - mu) / np.sqrt(var_eq)
+        else:
             mu, sigma, kappa, signal = 0, 0, 0, 0
 
         params[idx, :] = [X_t.iloc[-1], mu, sigma, kappa, r_squared, b, a, mask, signal]
