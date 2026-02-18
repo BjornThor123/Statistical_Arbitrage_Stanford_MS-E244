@@ -760,7 +760,12 @@ def forecast_returns_noisy_oracle(residual_returns: pd.DataFrame, config: dict) 
     np.random.seed(seed)
     
     # ===> YOUR CODE BELOW <===
-    raise NotImplementedError("forecast_returns_noisy_oracle not yet implemented")
+    future_returns = residual_returns[::-1].rolling(window=horizon).mean()[::-1]
+    returns_std = residual_returns[::-1].rolling(window=horizon).std()[::-1]
+    sigma_eta = (returns_std / np.sqrt(horizon)) * np.sqrt(1 / information_coefficient**2 - 1)
+    alpha = information_coefficient**2
+    noise = sigma_eta * np.random.randn(*residual_returns.shape)
+    return alpha * (future_returns + noise)
     # ===> YOUR CODE ABOVE <===
 
 
