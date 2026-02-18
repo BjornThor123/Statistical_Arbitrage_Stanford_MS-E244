@@ -19,6 +19,8 @@ import scipy as sp
 from IPython.display import display
 from scipy import stats
 from statsmodels.graphics.tsaplots import plot_acf
+from scipy.stats import linregress
+
 
 
 class FactorModel(ABC):
