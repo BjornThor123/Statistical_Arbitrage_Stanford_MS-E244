@@ -1,3 +1,24 @@
-data/*
+
 .venv
 .venv/*
+# Ignore all files inside data subdirectories
+data/options/data/*
+data/options/metadata/*
+
+data/equities/data/*
+data/equities/metadata/*
+
+data/risk_free/data/*
+data/risk_free/metadata/*
+
+
+# But keep the directories themselves
+!data/options/data/.gitkeep
+!data/options/metadata/.gitkeep
+!data/equities/data/.gitkeep
+!data/equities/metadata/.gitkeep
+!data/risk_free/data/.gitkeep
+!data/risk_free/metadata/.gitkeep
+
+# Optional: ignore the DuckDB database file
+data/market_data.duckdb
