@@ -1,180 +1,298 @@
-import pandas as pd
-import numpy as np
 import time
-
-from pathlib import Path
+import logging
 import zipfile
-
-from concurrent.futures import ThreadPoolExecutor
-
-from typing import Union, List, Optional, Tuple, Any
+from pathlib import Path
 from functools import wraps
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import List, Optional
+
+import duckdb
+import pandas as pd
+
+logger = logging.getLogger(__name__)
+
+DB_FILENAME = "market_data.duckdb"
+
 
 def timer(func):
-    """Decorator to time function execution if verbose mode is on"""
+    """Decorator to time function execution if verbose mode is on."""
     @wraps(func)
     def wrapper(self, *args, **kwargs):
         if self.verbose:
             start_time = time.time()
             result = func(self, *args, **kwargs)
-            end_time = time.time()
-            print(f"{func.__name__} took {end_time - start_time:.2f} seconds")
+            elapsed = time.time() - start_time
+            logger.info(f"{func.__name__} took {elapsed:.2f}s")
+            print(f"{func.__name__} took {elapsed:.2f}s")
         else:
             result = func(self, *args, **kwargs)
         return result
     return wrapper
+
 
 class DataLoader:
     def __init__(self, data_path: str, verbose: bool = False):
         self.data_path = Path(data_path)
         self.options_path = self.data_path / "options"
         self.options_data_path = self.options_path / "data"
-        self.options_metadata_path = self.options_path / "metadata"
-        
+
         self.equities_path = self.data_path / "equities"
         self.equities_data_path = self.equities_path / "data"
-        self.equities_metadata_path = self.equities_path / "metadata"
-        
+
         self.rf_path = self.data_path / "risk_free"
         self.rf_data_path = self.rf_path / "data"
-        self.rf_metadata_path = self.rf_path / "metadata"
 
         self.verbose = verbose
-        
-    def unzip(self, *zip_files: Path, extract_to: Path) -> None:
+        self.db_path = self.data_path / DB_FILENAME
+        self.con = duckdb.connect(str(self.db_path))
+
+    def close(self):
+        self.con.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
+    # ── helpers ──────────────────────────────────────────────────────
+
+    def _unzip(self, *zip_files: Path, extract_to: Path) -> None:
         def extract_single(zip_file: Path):
-            with zipfile.ZipFile(zip_file, 'r') as zip_ref:
-                zip_ref.extractall(extract_to)
-        
+            try:
+                with zipfile.ZipFile(zip_file, 'r') as zip_ref:
+                    zip_ref.extractall(extract_to)
+            except zipfile.BadZipFile:
+                logger.error(f"Corrupt zip file: {zip_file}")
+                raise
+
         with ThreadPoolExecutor() as executor:
-            executor.map(extract_single, zip_files)
-            
-    def ensure_col_name(self, metadata_path: Path, col_names: Union[str, List[str]]) -> bool:
-        # Convert string to list
-        if isinstance(col_names, str):
-            col_names = [col_names]
+            futures = {executor.submit(extract_single, zf): zf for zf in zip_files}
+            for future in as_completed(futures):
+                future.result()
 
-        metadata_file = next(metadata_path.glob("*dictionary.csv"))
-        metadata = pd.read_csv(metadata_file)
-        variable_names = metadata["Variable Name"].values
-
-        if not all(col in variable_names for col in col_names):
-            raise ValueError(f"Not all columns {col_names} found in metadata at {metadata_path}")
-        return True
-    
-    @timer
-    def load_options_data(self,
-                            tickers: List = None,
-                            start_date: pd.Timestamp = None,
-                            end_date: pd.Timestamp = None,
-                            ) -> pd.DataFrame:
-        
-        # Unzip options data if not already unzipped
-        zip_files = list(self.options_data_path.glob("*.zip"))
+    def _ensure_unzipped(self, data_path: Path) -> None:
+        """Unzip all zip files and rename extensionless files to .csv."""
+        zip_files = list(data_path.glob("*.zip"))
         if zip_files:
-            self.unzip(*zip_files, extract_to=self.options_data_path)
-        
-        # Load all CSV files into a single DataFrame
-        csv_files = list(self.options_data_path.glob("**/*.csv"))
+            self._unzip(*zip_files, extract_to=data_path)
 
-        # Check metadata once before processing
-        self.ensure_col_name(self.options_metadata_path, ['ticker', 'date'])
+        for f in data_path.iterdir():
+            if f.is_file() and f.suffix == '' and not f.name.startswith('.'):
+                f.rename(f.with_suffix('.csv'))
 
-        data_frames = []
-        for csv_file in csv_files:
-            df = pd.read_csv(csv_file, low_memory=False)
-            if tickers is not None:
-                df = df[df['ticker'].isin(tickers)]
-            
-            df['date'] = pd.to_datetime(df['date'])
-            if start_date is not None:
-                df = df[df['date'] >= start_date]
-            if end_date is not None:
-                df = df[df['date'] <= end_date]
-            
-            data_frames.append(df)
-        
-        if not data_frames:
-            return pd.DataFrame()
-        options_data = pd.concat(data_frames, ignore_index=True)
-        return options_data
-    
-    
-    @timer
-    def load_equities_data(self, tickers: List = None,
-                           start_date: pd.Timestamp = None,
-                           end_date: pd.Timestamp = None) -> pd.DataFrame:
+    @staticmethod
+    def _extract_options_label(filename: str) -> str:
+        """options_BAC.zip -> BAC, options_XLF_etf.csv -> XLF_etf"""
+        name = Path(filename).stem  # strip .zip / .csv
+        if name.startswith("options_"):
+            return name[len("options_"):]
+        return name
 
-        # Unzip equities data if not already unzipped
-        zip_files = list(self.equities_data_path.glob("*.zip"))
-        if zip_files:
-            self.unzip(*zip_files, extract_to=self.equities_data_path)
+    @staticmethod
+    def _extract_equities_label(filename: str) -> str:
+        """crsp_daily_agricultural.csv.gz -> agricultural"""
+        name = filename
+        for suffix in ('.gz', '.csv'):
+            if name.endswith(suffix):
+                name = name[:-len(suffix)]
+        if name.startswith("crsp_daily_"):
+            return name[len("crsp_daily_"):]
+        return name
 
-        # Load all CSV files into a single DataFrame
-        csv_files = list(self.equities_data_path.glob("**/*.csv"))
+    def _table_exists(self, table_name: str) -> bool:
+        result = self.con.execute(
+            "SELECT count(*) FROM information_schema.tables WHERE table_name = ?",
+            [table_name],
+        ).fetchone()
+        return result[0] > 0
 
-        # Check metadata once before processing
-        self.ensure_col_name(self.equities_metadata_path, ['ticker', 'date'])
+    # ── ingestion ────────────────────────────────────────────────────
 
-        data_frames = []
-        for csv_file in csv_files:
-            df = pd.read_csv(csv_file, low_memory=False)
-            if tickers is not None:
-                df = df[df['ticker'].isin(tickers)]
+    def _collect_options_files(self) -> List[tuple[Path, str]]:
+        """Unzip options zips and return list of (csv_path, label) pairs.
 
-            df['date'] = pd.to_datetime(df['date'])
-            if start_date is not None:
-                df = df[df['date'] >= start_date]
-            if end_date is not None:
-                df = df[df['date'] <= end_date]
+        The label comes from the zip filename (options_XXX.zip -> XXX),
+        since extracted files may have unrelated names.
+        """
+        pairs = []
 
-            data_frames.append(df)
+        # Process zip files: extract and map label from zip name
+        for zip_file in self.options_data_path.glob("*.zip"):
+            label = self._extract_options_label(zip_file.name)
+            with zipfile.ZipFile(zip_file, 'r') as zf:
+                for member in zf.namelist():
+                    extracted = self.options_data_path / member
+                    if not extracted.exists():
+                        zf.extract(member, self.options_data_path)
+                    # Rename extensionless files to .csv
+                    if extracted.suffix == '':
+                        csv_path = extracted.with_suffix('.csv')
+                        if not csv_path.exists():
+                            extracted.rename(csv_path)
+                        extracted = csv_path
+                    pairs.append((extracted, label))
 
-        if not data_frames:
-            return pd.DataFrame()
-        equities_data = pd.concat(data_frames, ignore_index=True)
-        return equities_data
+        # Also pick up any loose CSV files that aren't from zips
+        zip_extracted = {p for p, _ in pairs}
+        for f in self.options_data_path.iterdir():
+            if (f.is_file()
+                and f.name.endswith(('.csv', '.csv.gz'))
+                and f.name not in ("all_unzipped.csv",)
+                and f not in zip_extracted):
+                pairs.append((f, self._extract_options_label(f.name)))
+
+        return pairs
 
     @timer
-    def load_rf_data(self, start_date: pd.Timestamp = None,
-                     end_date: pd.Timestamp = None) -> pd.DataFrame:
+    def build_options_table(self) -> None:
+        """Ingest all options data files into the 'options' DuckDB table with a source_label column."""
+        if self._table_exists("options"):
+            if self.verbose:
+                print("Table 'options' already exists, skipping.")
+            return
 
-        # Unzip risk-free data if not already unzipped
-        zip_files = list(self.rf_data_path.glob("*.zip"))
-        if zip_files:
-            self.unzip(*zip_files, extract_to=self.rf_data_path)
+        file_label_pairs = self._collect_options_files()
+        if not file_label_pairs:
+            raise FileNotFoundError(f"No data files found in {self.options_data_path}")
 
-        # Load all CSV files into a single DataFrame
-        csv_files = list(self.rf_data_path.glob("**/*.csv"))
+        if self.verbose:
+            print(f"Ingesting {len(file_label_pairs)} options files into DuckDB...")
 
-        # Check metadata once before processing
-        self.ensure_col_name(self.rf_metadata_path, 'date')
+        first = True
+        for data_file, label in file_label_pairs:
+            escaped_path = str(data_file).replace("'", "''")
+            if first:
+                self.con.execute(f"""
+                    CREATE TABLE options AS
+                    SELECT *, '{label}' AS source_label
+                    FROM read_csv('{escaped_path}', auto_detect=true, all_varchar=true)
+                """)
+                first = False
+            else:
+                self.con.execute(f"""
+                    INSERT INTO options
+                    SELECT *, '{label}' AS source_label
+                    FROM read_csv('{escaped_path}', auto_detect=true, all_varchar=true)
+                """)
 
-        data_frames = []
-        for csv_file in csv_files:
-            df = pd.read_csv(csv_file, low_memory=False)
+        count = self.con.execute("SELECT count(*) FROM options").fetchone()[0]
+        if self.verbose:
+            print(f"Options table: {count:,} rows")
 
-            df['date'] = pd.to_datetime(df['date'])
-            if start_date is not None:
-                df = df[df['date'] >= start_date]
-            if end_date is not None:
-                df = df[df['date'] <= end_date]
+    @timer
+    def build_equities_table(self) -> None:
+        """Ingest all equities data files into the 'equities' DuckDB table with a source_label column."""
+        if self._table_exists("equities"):
+            if self.verbose:
+                print("Table 'equities' already exists, skipping.")
+            return
 
-            data_frames.append(df)
+        data_files = [
+            f for f in self.equities_data_path.iterdir()
+            if f.is_file()
+            and f.name.endswith(('.csv', '.csv.gz'))
+            and f.name not in ("all_unzipped.csv", "crsp_daily_all.csv")
+        ]
+        if not data_files:
+            raise FileNotFoundError(f"No data files found in {self.equities_data_path}")
 
-        if not data_frames:
-            return pd.DataFrame()
-        rf_data = pd.concat(data_frames, ignore_index=True)
-        return rf_data
+        if self.verbose:
+            print(f"Ingesting {len(data_files)} equities files into DuckDB...")
+
+        first = True
+        for data_file in data_files:
+            label = self._extract_equities_label(data_file.name)
+            escaped_path = str(data_file).replace("'", "''")
+            if first:
+                self.con.execute(f"""
+                    CREATE TABLE equities AS
+                    SELECT *, '{label}' AS source_label
+                    FROM read_csv('{escaped_path}', auto_detect=true, all_varchar=true)
+                """)
+                first = False
+            else:
+                self.con.execute(f"""
+                    INSERT INTO equities
+                    SELECT *, '{label}' AS source_label
+                    FROM read_csv('{escaped_path}', auto_detect=true, all_varchar=true)
+                """)
+
+        count = self.con.execute("SELECT count(*) FROM equities").fetchone()[0]
+        if self.verbose:
+            print(f"Equities table: {count:,} rows")
+
+    @timer
+    def build_rf_table(self) -> None:
+        """Ingest risk-free rate data into the 'risk_free' DuckDB table."""
+        if self._table_exists("risk_free"):
+            if self.verbose:
+                print("Table 'risk_free' already exists, skipping.")
+            return
+
+        data_files = [
+            f for f in self.rf_data_path.iterdir()
+            if f.is_file() and f.name.endswith(('.csv', '.csv.gz'))
+        ]
+        if not data_files:
+            raise FileNotFoundError(f"No data files found in {self.rf_data_path}")
+
+        if self.verbose:
+            print(f"Ingesting {len(data_files)} risk-free files into DuckDB...")
+
+        first = True
+        for data_file in data_files:
+            escaped_path = str(data_file).replace("'", "''")
+            if first:
+                self.con.execute(f"""
+                    CREATE TABLE risk_free AS
+                    SELECT * FROM read_csv('{escaped_path}', auto_detect=true, all_varchar=true)
+                """)
+                first = False
+            else:
+                self.con.execute(f"""
+                    INSERT INTO risk_free
+                    SELECT * FROM read_csv('{escaped_path}', auto_detect=true, all_varchar=true)
+                """)
+
+        count = self.con.execute("SELECT count(*) FROM risk_free").fetchone()[0]
+        if self.verbose:
+            print(f"Risk-free table: {count:,} rows")
+
+    def build_all(self) -> None:
+        """Build all tables."""
+        self.build_options_table()
+        self.build_equities_table()
+        self.build_rf_table()
+
+    # ── query helpers ────────────────────────────────────────────────
+
+    def query(self, sql: str) -> pd.DataFrame:
+        """Run arbitrary SQL and return a DataFrame."""
+        return self.con.execute(sql).fetchdf()
+
+    def tables(self) -> List[str]:
+        """List all tables in the database."""
+        return self.con.execute("SHOW TABLES").fetchdf()["name"].tolist()
+
+    def describe(self, table_name: str) -> pd.DataFrame:
+        """Describe a table's schema."""
+        return self.con.execute(f"DESCRIBE {table_name}").fetchdf()
+
 
 if __name__ == "__main__":
     data_path = "/Users/bjorn/Documents/Skóli/Stanford/Skóli/Q2/StatArb/Statistical_Arbitrage_Stanford_MS-E244/project/data"
-    data_loader = DataLoader(data_path, verbose=True)
-    options_data = data_loader.load_options_data()
-    print(options_data.head())
 
-        
-    
-        
-        
-    
+    with DataLoader(data_path, verbose=True) as dl:
+        dl.build_all()
+
+        print("\nTables:", dl.tables())
+        print("\nOptions schema:")
+        print(dl.describe("options"))
+        print("\nEquities schema:")
+        print(dl.describe("equities"))
+
+        print("\nOptions source labels:")
+        print(dl.query("SELECT DISTINCT source_label FROM options"))
+        print("\nEquities source labels:")
+        print(dl.query("SELECT DISTINCT source_label FROM equities"))
