@@ -7,4 +7,3 @@ query = "SELECT * FROM options WHERE ticker = 'GS' and date >= '2018-01-01' and 
 option_data = loader.query(query)
 print(option_data.head())
 
-
