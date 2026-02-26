@@ -330,7 +330,6 @@ class DataExplorer:
 
 
 if __name__ == "__main__":
-    data_path = "/Users/bjorn/Documents/Skóli/Stanford/Skóli/Q2/StatArb/Statistical_Arbitrage_Stanford_MS-E244/project/data"
-
+    data_path = "/Users/kadenwu/Desktop/School/Grad/Year 1/Winter_26/Statistical Arbitrage/Statistical_Arbitrage_Stanford_MS-E244/project/data/market_data.duckdb" 
     with DataExplorer(data_path) as explorer:
         explorer.run_all()
