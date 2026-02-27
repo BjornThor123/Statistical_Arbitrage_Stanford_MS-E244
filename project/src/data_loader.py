@@ -4,12 +4,36 @@ import zipfile
 from pathlib import Path
 from functools import wraps
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List, Optional
+from typing import List, Optional, Dict
 
 import duckdb
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+
+
+# Map metadata Type strings to DuckDB types (case-insensitive)
+METADATA_TYPE_MAP = {
+    "character": "VARCHAR",
+    "char": "VARCHAR",
+    "varchar": "VARCHAR",
+    "string": "VARCHAR",
+    "text": "VARCHAR",
+    "numeric": "DOUBLE",
+    "double": "DOUBLE",
+    "float": "DOUBLE",
+    "real": "DOUBLE",
+    "decimal": "DOUBLE",
+    "integer": "INTEGER",
+    "int": "INTEGER",
+    "number": "INTEGER",
+    "bigint": "BIGINT",
+    "long": "BIGINT",
+    "date": "DATE",
+    "datetime": "DATE",
+    "timestamp": "DATE",
+}
 
 DB_FILENAME = "market_data.duckdb"
 
@@ -35,9 +59,11 @@ class DataLoader:
         self.data_path = Path(data_path)
         self.options_path = self.data_path / "options"
         self.options_data_path = self.options_path / "data"
+        self.options_metadata_path = self.options_path / "metadata"
 
         self.equities_path = self.data_path / "equities"
         self.equities_data_path = self.equities_path / "data"
+        self.equities_metadata_path = self.equities_path / "metadata"
 
         self.rf_path = self.data_path / "risk_free"
         self.rf_data_path = self.rf_path / "data"
@@ -107,6 +133,108 @@ class DataLoader:
         ).fetchone()
         return result[0] > 0
 
+    def _quoted(self, col: str) -> str:
+        """Quote column name for SQL (handles reserved words like 'class')."""
+        return f'"{col}"'
+
+    def _find_metadata_file(self, metadata_dir: Path, data_dir: Path) -> Optional[Path]:
+        """Find metadata CSV in metadata dir or recursively in data dir.
+        Metadata must have 'Variable Name' (or 'VariableName') and 'Type' columns.
+        """
+        for search_dir in (metadata_dir, data_dir):
+            if not search_dir.exists():
+                continue
+            for pattern in ("*dictionary*.csv", "*metadata*.csv", "*.csv"):
+                for p in search_dir.rglob(pattern):
+                    if p.is_file() and "sp500" not in p.name.lower():
+                        try:
+                            df = pd.read_csv(p, nrows=1)
+                            cols = [c.strip() for c in df.columns]
+                            name_col = next(
+                                (c for c in cols if "variable" in c.lower() and "name" in c.lower()),
+                                None,
+                            )
+                            type_col = next((c for c in cols if c.lower() == "type"), None)
+                            if name_col and type_col:
+                                return p
+                        except Exception:
+                            continue
+        return None
+
+    def _load_metadata_schema(self, metadata_path: Path) -> Dict[str, str]:
+        """Load column name -> DuckDB type from metadata CSV.
+        Metadata has columns: Variable Name, Type, Description.
+        """
+        df = pd.read_csv(metadata_path)
+        name_col = next(
+            (c for c in df.columns if "variable" in c.lower() and "name" in c.lower()),
+            df.columns[0],
+        )
+        type_col = next((c for c in df.columns if c.strip().lower() == "type"), None)
+        if type_col is None:
+            return {}
+
+        schema = {}
+        for _, row in df.iterrows():
+            var_name = str(row[name_col]).strip()
+            if pd.isna(var_name) or var_name == "":
+                continue
+            raw_type = str(row[type_col]).strip().lower() if pd.notna(row[type_col]) else ""
+            # Normalize: "number(10,2)" -> "number", "character(10)" -> "character"
+            base_type = raw_type.split("(")[0].split()[0] if raw_type else ""
+            duck_type = METADATA_TYPE_MAP.get(base_type, "VARCHAR")
+            schema[var_name] = duck_type
+
+        return schema
+
+    def _build_select_with_schema(
+        self,
+        csv_path: str,
+        column_types: Dict[str, str],
+        column_order: Optional[List[str]] = None,
+        *,
+        source_label: Optional[str] = None,
+    ) -> tuple[str, List[str]]:
+        """Build SELECT clause with type casts from CSV.
+
+        Returns (select_sql, column_order). Pass column_order to subsequent
+        calls so INSERT uses the same column order as the table.
+        If source_label is set, adds that column (for options/equities).
+
+        We use all_varchar in read_csv to read raw strings, then TRY_CAST in
+        our SELECT. This avoids DuckDB auto-detect inferring VARCHAR for columns
+        with mixed/bad data. TRY_CAST converts invalid values to NULL.
+        """
+        escaped = str(csv_path).replace("'", "''")
+        cols_df = self.con.execute(f"""
+            SELECT * FROM read_csv('{escaped}', auto_detect=true, all_varchar=true)
+            LIMIT 0
+        """).fetchdf()
+        csv_columns = set(cols_df.columns.tolist())
+        order = column_order if column_order is not None else list(cols_df.columns)
+
+        # Case-insensitive lookup: metadata may have "PRC", CSV may have "prc"
+        type_lookup = {k.lower(): v for k, v in column_types.items()}
+        select_parts = []
+        for col in order:
+            if col == "source_label":
+                if source_label is not None:
+                    select_parts.append(f"'{source_label}' AS {self._quoted('source_label')}")
+                continue
+            q = self._quoted(col)
+            target_type = column_types.get(col) or type_lookup.get(col.lower(), "VARCHAR")
+            if col not in csv_columns:
+                select_parts.append(f"CAST(NULL AS {target_type}) AS {q}")
+            elif target_type == "VARCHAR":
+                select_parts.append(f"raw.{q} AS {q}")
+            else:
+                select_parts.append(f"TRY_CAST(raw.{q} AS {target_type}) AS {q}")
+
+        if source_label is not None and "source_label" not in order:
+            select_parts.append(f"'{source_label}' AS {self._quoted('source_label')}")
+        table_order = order if (source_label is None or "source_label" in order) else order + ["source_label"]
+        return ",\n        ".join(select_parts), table_order
+
     # ── ingestion ────────────────────────────────────────────────────
 
     def _collect_options_files(self) -> List[tuple[Path, str]]:
@@ -146,11 +274,23 @@ class DataLoader:
 
     @timer
     def build_options_table(self) -> None:
-        """Ingest all options data files into the 'options' DuckDB table with a source_label column."""
+        """Ingest all options data files into the 'options' DuckDB table.
+
+        Column types are read from metadata (options/metadata/*.csv or
+        options/data/**/*dictionary*.csv). Metadata must have columns:
+        Variable Name, Type, Description.
+        """
         if self._table_exists("options"):
             if self.verbose:
                 print("Table 'options' already exists, skipping.")
             return
+
+        metadata_path = self._find_metadata_file(
+            self.options_metadata_path, self.options_data_path
+        )
+        column_types = self._load_metadata_schema(metadata_path) if metadata_path else {}
+        if not column_types and self.verbose:
+            print("No options metadata found; all columns will be VARCHAR.")
 
         file_label_pairs = self._collect_options_files()
         if not file_label_pairs:
@@ -159,21 +299,29 @@ class DataLoader:
         if self.verbose:
             print(f"Ingesting {len(file_label_pairs)} options files into DuckDB...")
 
-        first = True
-        for data_file, label in file_label_pairs:
+        column_order = None
+        for i, (data_file, label) in enumerate(file_label_pairs):
             escaped_path = str(data_file).replace("'", "''")
-            if first:
+            select_clause, column_order = self._build_select_with_schema(
+                str(data_file), column_types, column_order, source_label=label
+            )
+            if i == 0:
                 self.con.execute(f"""
                     CREATE TABLE options AS
-                    SELECT *, '{label}' AS source_label
-                    FROM read_csv('{escaped_path}', auto_detect=true, all_varchar=true)
+                    SELECT
+                        {select_clause}
+                    FROM (
+                        SELECT * FROM read_csv('{escaped_path}', auto_detect=true, all_varchar=true)
+                    ) AS raw
                 """)
-                first = False
             else:
                 self.con.execute(f"""
                     INSERT INTO options
-                    SELECT *, '{label}' AS source_label
-                    FROM read_csv('{escaped_path}', auto_detect=true, all_varchar=true)
+                    SELECT
+                        {select_clause}
+                    FROM (
+                        SELECT * FROM read_csv('{escaped_path}', auto_detect=true, all_varchar=true)
+                    ) AS raw
                 """)
 
         count = self.con.execute("SELECT count(*) FROM options").fetchone()[0]
@@ -182,11 +330,24 @@ class DataLoader:
 
     @timer
     def build_equities_table(self) -> None:
-        """Ingest all equities data files into the 'equities' DuckDB table with a source_label column."""
+        """Ingest all equities data files into the 'equities' DuckDB table.
+
+        Column types are read from metadata (equities/metadata/*.csv).
+        Skips sp500 constituents file. Metadata must have: Variable Name, Type, Description.
+        """
         if self._table_exists("equities"):
             if self.verbose:
                 print("Table 'equities' already exists, skipping.")
             return
+
+        metadata_path = self._find_metadata_file(
+            self.equities_metadata_path, self.equities_data_path
+        )
+        print(metadata_path)
+        column_types = self._load_metadata_schema(metadata_path) if metadata_path else {}
+        print(column_types)
+        if not column_types and self.verbose:
+            print("No equities metadata found; all columns will be VARCHAR.")
 
         data_files = [
             f for f in self.equities_data_path.iterdir()
@@ -200,31 +361,64 @@ class DataLoader:
         if self.verbose:
             print(f"Ingesting {len(data_files)} equities files into DuckDB...")
 
-        first = True
-        for data_file in data_files:
+        column_order = None
+        for i, data_file in enumerate(data_files):
             label = self._extract_equities_label(data_file.name)
             escaped_path = str(data_file).replace("'", "''")
-            if first:
+            select_clause, column_order = self._build_select_with_schema(
+                str(data_file), column_types, column_order, source_label=label
+            )
+            if i == 0:
                 self.con.execute(f"""
                     CREATE TABLE equities AS
-                    SELECT *, '{label}' AS source_label
-                    FROM read_csv('{escaped_path}', auto_detect=true, all_varchar=true)
+                    SELECT
+                        {select_clause}
+                    FROM (
+                        SELECT * FROM read_csv('{escaped_path}', auto_detect=true, all_varchar=true)
+                    ) AS raw
                 """)
-                first = False
             else:
                 self.con.execute(f"""
                     INSERT INTO equities
-                    SELECT *, '{label}' AS source_label
-                    FROM read_csv('{escaped_path}', auto_detect=true, all_varchar=true)
+                    SELECT
+                        {select_clause}
+                    FROM (
+                        SELECT * FROM read_csv('{escaped_path}', auto_detect=true, all_varchar=true)
+                    ) AS raw
                 """)
 
         count = self.con.execute("SELECT count(*) FROM equities").fetchone()[0]
         if self.verbose:
             print(f"Equities table: {count:,} rows")
 
+    def _build_rf_schema(self, csv_path: Path) -> Dict[str, str]:
+        """Build risk_free schema from first CSV.
+        Col 1: date (DATE), Col 2: MAX_DATA_TTM (INTEGER), Rest: maturity months (DOUBLE).
+        """
+        cols_df = self.con.execute(f"""
+            SELECT * FROM read_csv('{str(csv_path).replace("'", "''")}', auto_detect=true, all_varchar=true)
+            LIMIT 0
+        """).fetchdf()
+        cols = cols_df.columns.tolist()
+        schema = {}
+        for i, col in enumerate(cols):
+            if i == 0:
+                schema[col] = "DATE"
+            elif i == 1 or "max_data_ttm" in str(col).lower():
+                schema[col] = "INTEGER"
+            elif col.isdigit():
+                schema[col] = "DOUBLE"
+            else:
+                schema[col] = "VARCHAR"
+        return schema
+
     @timer
     def build_rf_table(self) -> None:
-        """Ingest risk-free rate data into the 'risk_free' DuckDB table."""
+        """Ingest risk-free rate data into the 'risk_free' DuckDB table.
+
+        No metadata file. Schema inferred: first column = DATE, second = MAX_DATA_TTM
+        (INTEGER, max 350/360), remaining columns = maturity in months (DOUBLE rates).
+        """
         if self._table_exists("risk_free"):
             if self.verbose:
                 print("Table 'risk_free' already exists, skipping.")
@@ -240,19 +434,30 @@ class DataLoader:
         if self.verbose:
             print(f"Ingesting {len(data_files)} risk-free files into DuckDB...")
 
-        first = True
-        for data_file in data_files:
+        column_types = self._build_rf_schema(data_files[0])
+        column_order = None
+        for i, data_file in enumerate(data_files):
             escaped_path = str(data_file).replace("'", "''")
-            if first:
+            select_clause, column_order = self._build_select_with_schema(
+                str(data_file), column_types, column_order, source_label=None
+            )
+            if i == 0:
                 self.con.execute(f"""
                     CREATE TABLE risk_free AS
-                    SELECT * FROM read_csv('{escaped_path}', auto_detect=true, all_varchar=true)
+                    SELECT
+                        {select_clause}
+                    FROM (
+                        SELECT * FROM read_csv('{escaped_path}', auto_detect=true, all_varchar=true)
+                    ) AS raw
                 """)
-                first = False
             else:
                 self.con.execute(f"""
                     INSERT INTO risk_free
-                    SELECT * FROM read_csv('{escaped_path}', auto_detect=true, all_varchar=true)
+                    SELECT
+                        {select_clause}
+                    FROM (
+                        SELECT * FROM read_csv('{escaped_path}', auto_detect=true, all_varchar=true)
+                    ) AS raw
                 """)
 
         count = self.con.execute("SELECT count(*) FROM risk_free").fetchone()[0]
@@ -270,19 +475,22 @@ class DataLoader:
         if not self._table_exists("risk_free"):
             raise RuntimeError("risk_free table must be built first.")
 
-        # Get maturity column names (digits only: "1", "2", ..., "360")
-        cols = self.con.execute("DESCRIBE risk_free").fetchdf()["column_name"].tolist()
+        # First col = date, second = MAX_DATA_TTM, rest = maturity (1,2,...,360)
+        desc = self.con.execute("DESCRIBE risk_free").fetchdf()
+        col_key = "column_name" if "column_name" in desc.columns else desc.columns[0]
+        cols = desc[col_key].tolist()
+        date_col = cols[0]
         maturity_cols = [c for c in cols if c.isdigit()]
 
         if not maturity_cols:
             raise RuntimeError("No maturity columns found in risk_free table.")
 
-        # Build UNPIVOT expression
         col_list = ", ".join(f'"{c}"' for c in maturity_cols)
+        q_date = self._quoted(date_col)
         self.con.execute(f"""
             CREATE TABLE rf_long AS
             SELECT
-                CAST(column000 AS DATE) AS date,
+                CAST({q_date} AS DATE) AS date,
                 CAST(maturity AS INTEGER) AS maturity_months,
                 CAST(rate AS DOUBLE) AS rate
             FROM (
@@ -291,7 +499,7 @@ class DataLoader:
                 INTO NAME maturity VALUE rate
             )
             WHERE rate IS NOT NULL
-              AND CAST(column000 AS VARCHAR) NOT IN ('', 'None')
+              AND CAST({q_date} AS VARCHAR) NOT IN ('', 'None')
         """)
 
         count = self.con.execute("SELECT count(*) FROM rf_long").fetchone()[0]
@@ -412,7 +620,7 @@ class DataLoader:
 
 
 if __name__ == "__main__":
-    data_path = "/Users/bjorn/Documents/Skóli/Stanford/Skóli/Q2/StatArb/Statistical_Arbitrage_Stanford_MS-E244/project/data"
+    data_path = "project/data"
 
     with DataLoader(data_path, verbose=True) as dl:
         dl.build_all()

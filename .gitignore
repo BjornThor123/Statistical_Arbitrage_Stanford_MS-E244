@@ -4,3 +4,15 @@ venv/*
 */__pycache__/
 .DS_Store
 */results
+data/relevant_data/*
+*.parquet
+*.csv
+*.json
+*.xlsx
+*.xls
+*.xml
+*.yaml
+*.gz
+*.zip
+project/stat_arb.egg-info/*
+*.pyc
