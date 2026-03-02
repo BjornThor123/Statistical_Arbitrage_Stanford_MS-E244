@@ -6,9 +6,10 @@ from pathlib import Path
 @dataclass(frozen=True)
 class Config:
     data_path: Path = Path("project/data")
-    start_date: datetime = datetime(2016, 1, 1)
-    end_date: datetime = datetime(2020, 12, 31)
+    start_date: datetime = datetime(2018, 1, 1)
+    end_date: datetime = datetime(2022, 12, 31)
     max_tte: int = 30
+    sector_ticker = "XLF"
 
     relevant_option_columns: List[str] = field(default_factory=lambda: [
         "secid",
@@ -38,7 +39,7 @@ class Config:
         # "root",
         # "suffix",
         # "cusip",
-        # "ticker",
+        "ticker",
         # "sic",
         # "index_flag",
         # "exchange_d",
