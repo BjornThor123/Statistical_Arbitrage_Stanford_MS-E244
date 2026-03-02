@@ -4,6 +4,7 @@ loader = DataLoader(data_path = "/Users/bjorn/Documents/Skóli/Stanford/Skóli/Q
 
 # Get option data from GS ticker and years 2018-2020
 query = "SELECT * FROM options WHERE ticker = 'GS' and date >= '2018-01-01' and date <= '2020-12-31'"
+#query = "SELECT DISTINCT ticker FROM options"
 option_data = loader.query(query)
 print(option_data.head())
 print(option_data.columns)
