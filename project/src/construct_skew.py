@@ -1,13 +1,14 @@
 import pandas as pd
 import numpy as np
 from src.config import get_config
+from src.utils.black_scholes import impute_impl_vol_bs
 
 config = get_config()
 
 
 # ── Skew extraction ──────────────────────────────────────────────────────────
 
-def extract_skew_df(df, tte_days=15, min_points=3) -> pd.DataFrame:
+def extract_skew_df(df, tte_days=15, min_points=3, verbose = True) -> pd.DataFrame:
     """
     For each ticker and date, fit:
         IV = α + β·log(K/F) + γ·log(K/F)²
@@ -59,6 +60,10 @@ def extract_skew_df(df, tte_days=15, min_points=3) -> pd.DataFrame:
             )
         )
         df_stock = df.loc[otm_filter]
+
+        if verbose: print(f'Imputing missing implied volatilities for {ticker}')
+        df_stock = impute_impl_vol_bs(df_stock)
+        if verbose: print(f'Done imputing missing implied volatiliteis for {ticker}')
 
         skew_series = df_stock.groupby('date')[
             ['log_moneyness', 'impl_volatility', 'tte_days']

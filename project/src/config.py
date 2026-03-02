@@ -6,6 +6,7 @@ from pathlib import Path
 @dataclass(frozen=True)
 class Config:
     data_path: Path = Path("project/data")
+    plot_dir: Path = Path("project/plots")
     start_date: datetime = datetime(2018, 1, 1)
     end_date: datetime = datetime(2022, 12, 31)
     max_tte: int = 30
