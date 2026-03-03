@@ -49,8 +49,8 @@ config = get_config()
 
 def compute_signals(
     resid_df: pd.DataFrame,
-    entry_threshold: float = 1.0,
-    exit_threshold: float = 0.5,
+    entry_threshold: float = config.entry_threshold,
+    exit_threshold: float = config.exit_threshold,
     signal_window: int = 60,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
@@ -114,8 +114,8 @@ def run_strategy(
     df: pd.DataFrame,
     tte_days: int = 15,
     estimation_window: int = 60,
-    entry_threshold: float = 1.0,
-    exit_threshold: float = 0.5,
+    entry_threshold: float = config.entry_threshold,
+    exit_threshold: float = config.exit_threshold,
     sector_ticker: str = config.sector_ticker,
 ) -> dict:
     """
