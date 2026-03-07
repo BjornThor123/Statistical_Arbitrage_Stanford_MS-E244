@@ -1,6 +1,8 @@
 
 .venv
 .venv/*
+**/__pycache__/
+**/*.pyc
 # Ignore all files inside data subdirectories
 data/options/data/*
 data/options/metadata/*

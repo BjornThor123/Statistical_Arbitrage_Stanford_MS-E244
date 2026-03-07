@@ -1,0 +1,157 @@
+\documentclass{article}
+\usepackage{graphicx} % Required for inserting images
+\usepackage{amsmath}
+
+\bibliographystyle{abbrv} 
+
+
+\title{MSE244 Final Project Outline}
+\author{Björn Stefánsson, Kaden Wu, Sondre Rogde}
+\date{February 2026}
+
+\begin{document}
+
+\maketitle
+
+\section{Introduction}
+
+Objective: To generate alpha by capturing mean-reversion in the idiosyncratic skewness of equity volatility surfaces.
+
+Intuition: Market participants often overpay for tail risk (skew) in single stocks due to temporary liquidity demands or panic, rather than fundamental shifts. While a stock's skew generally moves in lockstep with its sector (systematic fear), deviations from this relationship often represent inefficient pricing. By isolating the fraction of skew not explained by sector movements, we can construct a portfolio that profits as these pricing errors normalize.
+
+Summary of idea:
+\begin{enumerate}
+    \item Calculate the volatility surface based on options data for each stock and for a sector.
+    \item Calculate the skew based on the slope of the volatility surface.
+    \item Regress the skew of a single on the market or sector skew.
+    \item Take positions based on the residuals from the above regression.
+\end{enumerate}
+
+\section{Data}
+
+
+\subsection{Required Data}
+The strategy relies on information from the equity options market and the underlying equities. For each stock $i$ and each sector $s$, we require:
+\begin{itemize}
+    \item Option prices (calls and puts) across a range of strikes $K$ and maturities $T$
+    \item Corresponding underlying stock prices $S_t$
+    \item Option maturities and contract specifications
+\end{itemize}
+
+From this information, we can infer implied volatilities and construct volatility surfaces. Sector-level volatility surfaces are constructed either by aggregating the implied volatility surfaces of constituent stocks or by using options on sector ETFs. We would also need the risk-free interest rates $r_t$.
+
+\subsection{Stock and Sector Selection}
+
+The universe is restricted to liquid equities. Liquidity filters may include:
+\begin{itemize}
+    \item Minimum volume in option and/or underlying 
+    \item Tight bid-ask spreads across multiple strikes
+    \item Availability of options across several maturities
+\end{itemize}
+
+\section{Implementation}
+
+The implementation proceeds in several steps, closely mirroring the logic of classical statistical arbitrage and pairs trading strategies discussed in class.
+
+\subsection{Volatility Surface Construction}
+
+For each stock $i$, we construct a volatility surface
+\[
+\sigma_i = \sigma_i(K, T)
+\]
+using implied volatilities inferred from option prices.
+
+We consider multiple approaches to estimate the volatility surface:
+
+\subsubsection{Black--Scholes Implied Volatility}
+A simple and robust approach is to invert the Black--Scholes formula for each option:
+\[
+C^{\text{BS}}(S_t, K, T, r, \sigma) = C^{\text{mkt}}
+\]
+and solve for $\sigma$. Interpolating across strikes and maturities yields a discrete volatility surface. While this method ignores smile dynamics, it provides a transparent baseline.
+
+\subsubsection{Parametric Volatility Models (SVI)}
+As a more advanced alternative, we fit the Stochastic Volatility Inspired (SVI) parameterization proposed by Gatheral \& Jacquier \cite{gatheral2013arbitragefreesvivolatilitysurfaces}. For log-moneyness $k = \log(K/F)$, where $K$ is the strike and $F$ is the expected forward price total implied variance is modeled as:
+\[
+w(k) = a + b \left( \rho (k - m) + \sqrt{(k - m)^2 + \sigma^2} \right),
+\]
+where $a, b, \rho, m, \sigma$ are parameters estimated by minimizing pricing errors. This approach produces smooth, arbitrage-free volatility smiles and allows for better skew estimation.
+
+\subsection{Skew Measurement}
+
+For a fixed maturity $T$, skew is defined as the slope of the implied volatility surface with respect to log-moneyness:
+\[
+\text{Skew}_{i,t} = \frac{\partial \sigma_i(k, T)}{\partial k}.
+\]
+In practice, this is approximated by finite differences or by using analytical derivatives from parametric models such as SVI.
+
+An analogous skew measure $\text{Skew}_{s,t}$ is constructed for the corresponding sector.
+
+\subsection{Isolation of Idiosyncratic Skew}
+
+To separate systematic from idiosyncratic skew movements, we regress the stock skew on the sector skew:
+\[
+\text{Skew}_{i,t} = \alpha_i + \beta_i \text{Skew}_{s,t} + \varepsilon_{i,t}.
+\]
+The residual $\varepsilon_{i,t}$ represents the component of skew unexplained by sector-wide movements and is interpreted as mispriced idiosyncratic tail risk.
+
+\subsection{Signal Construction and Trading Rule}
+
+Residuals are normalized using a rolling window to form a z-score:
+\[
+z_{i,t} = \frac{\varepsilon_{i,t} - \mu_{\varepsilon_i}}{\sigma_{\varepsilon_i}}.
+\]
+
+We enter a trade when the absolute value of the z-score exceeds one:
+\[
+|z_{i,t}| > 1.
+\]
+A positive z-score indicates that the stock skew is rich relative to the sector, leading to a position that sells skew (e.g., short downside protection). A negative z-score indicates cheap skew, leading to a position that buys skew.
+
+This trading logic is closely related to pairs trading strategies, where positions are taken based on deviations from a long-run equilibrium and profits are generated through mean reversion.
+
+\subsection{Portfolio Construction}
+
+Positions are constructed to be:
+\begin{itemize}
+    \item Delta-neutral
+    \item Approximately vega-neutral at the sector level
+    \item Diversified across stocks and sectors
+\end{itemize}
+
+Risk is managed through position limits, stop-loss rules, and periodic re-estimation of regression parameters.
+
+\subsection{Transaction Cost Modelling (TCM)}
+
+We assume a theoretical arbitrage opportunity represents a loss if the cost to enter and exit exceeds the convergence profit. The Net Expected Value is defined as:
+
+\begin{equation}
+    E[\text{P\&L}] = (\text{Expected Convergence} \times \text{Vega}) - \text{Total Cost}
+\end{equation}
+
+Where Total Cost accounts for round-trip execution. Expected convergence is $\sigma$ and vega is $\$/\sigma$,
+
+\begin{equation}
+    \text{Total Cost} = 2 \times (\text{Half-Spread} + \text{Impact} + \text{Commission}) + \text{Hedge Drag}
+\end{equation}
+
+\begin{itemize}
+    \item Half-Spread: The distance from the Mid-Price to the Bid/Ask.
+    \item Impact: Negligible due to the high liquidity of stock selection.
+    \item Hedge Drag: Estimated cost of re-balancing the Delta hedge, approximated as $\Gamma \times \sigma \times \text{Spread}$.
+\end{itemize}
+
+Trades are submitted only if $E[\text{P\&L}] > \text{Hurdle Rate}$.
+
+
+
+\section{Other Ideas to Explore}
+\begin{itemize}
+    \item Different ways to calculate the skew, i.e. the slope of the volatility surface.
+    \item Explore different entering strategies. The optimal z-score to enter a trade on is linked to the roughness of the signal process.
+\end{itemize}
+
+\bibliography{references}
+
+\end{document}
+

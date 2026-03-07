@@ -10,7 +10,16 @@ requires-python = ">=3.10"
 dependencies = [
     "pandas",
     "pyarrow",
+    "numpy",
+    "duckdb",
+    "torch",
+    "matplotlib",
+    "pillow",
 ]
+
+[project.scripts]
+ssvi-run = "src.strategies.ssvi.run:main"
+ssvi-dashboard = "src.strategies.ssvi.dashboard:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
