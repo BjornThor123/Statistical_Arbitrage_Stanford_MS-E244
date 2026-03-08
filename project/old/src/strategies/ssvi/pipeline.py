@@ -190,8 +190,8 @@ def fit_daily_ssvi_skew(
     first_exc: Exception | None = None
     n_exc = 0
     for d, day in panel.groupby("date"):
-        if len(day) < min_points_per_day:
-            continue
+        # if len(day) < min_points_per_day:
+        #     continue
         if day["t"].round(8).nunique() < min_maturities_per_day:
             continue
 
