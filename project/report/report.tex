@@ -1,0 +1,491 @@
+\documentclass[12pt, a4paper]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath, amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{caption}
+\usepackage{float}
+\usepackage{microtype}
+\usepackage{parskip}
+\usepackage{setspace}
+
+\onehalfspacing
+
+\title{\textbf{Idiosyncratic Skew Arbitrage in Equity Options}\\[0.5em]
+\large MSE 244 Final Project}
+\author{Bj\"{o}rn Thor Stef\'{a}nsson \and Kaden Wu \and Sondre Rogde}
+\date{March 2026}
+
+\begin{document}
+
+\maketitle
+\tableofcontents
+\newpage
+
+% ---------------------------------------------------------------------------
+\section{Introduction}
+% ---------------------------------------------------------------------------
+
+This project investigates a statistical arbitrage strategy that exploits
+mean-reversion in the \emph{idiosyncratic} component of equity options skew.
+Volatility skew---the empirical observation that out-of-the-money (OTM) puts
+trade at higher implied volatility than OTM calls---is a well-documented
+feature of equity option markets. A common explanation is that investors
+overpay for downside protection in single stocks due to temporary liquidity
+demands or behavioral biases, rather than genuine shifts in the underlying risk
+distribution.
+
+While a stock's skew tends to comove with its sector (reflecting systematic
+fear), deviations from this relationship can signal transient mispricings.
+By stripping out the sector-driven component of skew via regression and
+focusing on the unexplained residual---the \emph{idiosyncratic} skew---we
+identify stocks whose skew is temporarily rich or cheap relative to its
+historical norm. Positions are entered when this idiosyncratic component
+deviates sufficiently from zero and are held until it mean-reverts.
+
+The project proceeds as follows. Section~\ref{sec:data} describes the data
+sources and preprocessing pipeline. Section~\ref{sec:method} presents the
+full methodology, from volatility surface construction through to portfolio
+simulation, covering two distinct implementations: a simple spot-return proxy
+strategy and a delta-hedged risk-reversal options strategy.
+Section~\ref{sec:results} reports backtest performance.
+Section~\ref{sec:conclusion} concludes with observations and limitations.
+
+% ---------------------------------------------------------------------------
+\section{Data}
+\label{sec:data}
+% ---------------------------------------------------------------------------
+
+\subsection{Data Sources}
+
+The strategy requires three data inputs:
+
+\begin{enumerate}
+    \item \textbf{Equity options data.} Daily option chains (calls and puts)
+          across a range of strikes and maturities for each stock and the
+          sector ETF. Fields used include: date, expiration date, option type,
+          strike price, best bid, best offer, implied volatility, delta, gamma,
+          vega, theta, and contract size.
+
+    \item \textbf{Underlying equity prices.} Daily closing prices from CRSP for
+          each stock in the universe. These are used to compute spot returns
+          (Strategy~1) and to delta-hedge positions (Strategy~2).
+
+    \item \textbf{Risk-free interest rates.} Zero-coupon yield curves matched
+          to option maturities, used to compute forward prices and to invert
+          the Black--Scholes formula where implied volatility is missing.
+\end{enumerate}
+
+The sample period runs from January 2018 to December 2022, spanning
+pre-pandemic, pandemic shock, and post-pandemic regimes. The sector proxy is
+the XLF Financial Sector ETF, and the stock universe consists of liquid
+financial-sector equities for which option chains are available across multiple
+maturities throughout the sample. Only options with at most 30 calendar days to
+expiry are retained, consistent with a near-term skew signal targeting a 15-day
+tenor.
+
+\subsection{Data Ingestion and Storage}
+
+Raw data files (per-ticker option CSV archives, CRSP equity files, and a
+wide-format risk-free rate panel) are ingested into a local DuckDB database
+via a custom \texttt{DataLoader} class. The loader handles zip extraction,
+schema inference from accompanying metadata dictionaries, and type casting via
+\texttt{TRY\_CAST} to handle mixed or malformed fields without aborting the
+load.
+
+\subsection{Feature Engineering and Enrichment}
+
+After ingestion, an \texttt{options\_enriched} table is constructed by joining
+the raw options table with equity prices and risk-free rates, and computing the
+following derived fields:
+
+\begin{itemize}
+    \item \textbf{Strike.} Raw strike prices are stored in tenths of cents in
+          the source data; they are divided by $1{,}000$ to obtain
+          dollar-denominated strikes.
+
+    \item \textbf{Mid price.} $\text{mid} = (\text{bid} + \text{ask}) / 2$.
+
+    \item \textbf{Time to expiry.} Calendar days $\tau_{\mathrm{days}}$ and
+          annualised fraction $\tau = \tau_{\mathrm{days}} / 365$.
+
+    \item \textbf{Forward price.} Using the cost-of-carry formula with the
+          nearest-maturity risk-free rate $r$:
+          \[
+              F_t = S_t \, e^{r \tau}.
+          \]
+
+    \item \textbf{Log-moneyness.} The forward log-moneyness:
+          \[
+              k = \ln\!\left(\frac{K}{F_t}\right).
+          \]
+          Using the forward price as the normalising base ensures that
+          at-the-money options correspond to $k = 0$ independent of the
+          interest rate level.
+\end{itemize}
+
+\subsection{Implied Volatility Imputation}
+
+The dataset contains a meaningful fraction of options where implied volatility
+is missing. Rather than discarding these observations, we impute missing values
+by numerically inverting the Black--Scholes formula.
+
+For a European call the Black--Scholes price is:
+\begin{equation}
+    C^{\mathrm{BS}}(S, K, r, \tau, \sigma)
+    = S\,\Phi(d_1) - K e^{-r\tau}\,\Phi(d_2),
+    \label{eq:bs_call}
+\end{equation}
+where
+\[
+    d_1 = \frac{\ln(S/K) + (r + \tfrac{1}{2}\sigma^2)\tau}{\sigma\sqrt{\tau}},
+    \qquad
+    d_2 = d_1 - \sigma\sqrt{\tau},
+\]
+and $\Phi$ is the standard normal CDF. For each option with a missing implied
+volatility but a valid mid price, spot price, strike, and time to expiry, we
+solve
+\[
+    C^{\mathrm{BS}}(S_t, K, r, \tau, \hat{\sigma}) = p_{\mathrm{mid}}
+\]
+for $\hat{\sigma}$ using Brent's root-finding algorithm on $[10^{-4},\, 20]$.
+Options whose mid price violates the no-arbitrage intrinsic-value lower bound
+are left as \texttt{NaN} and excluded downstream. Only OTM options are used
+in the skew regression, consistent with market convention for smile fitting.
+
+% ---------------------------------------------------------------------------
+\section{Method}
+\label{sec:method}
+% ---------------------------------------------------------------------------
+
+The strategy pipeline consists of four sequential stages: (1) skew extraction,
+(2) idiosyncratic skew isolation, (3) signal construction, and (4) portfolio
+simulation. Two strategies share stages 1--3 but differ in how P\&L is
+computed at stage 4.
+
+\subsection{Stage 1: Skew Extraction}
+
+For each stock $i$ and date $t$ we estimate the slope of the implied volatility
+smile at a target maturity of $\tau^* = 15$ days. Skew is defined as the
+derivative of implied volatility with respect to log-moneyness at a fixed
+maturity:
+\begin{equation}
+    \mathrm{Skew}_{i,t} = \left.\frac{\partial \sigma_i(k, \tau)}{\partial k}
+    \right|_{\tau = \tau^*}.
+    \label{eq:skew_def}
+\end{equation}
+
+We approximate this slope by fitting a quadratic polynomial to the
+cross-section of OTM implied volatilities as a function of log-moneyness for
+each (ticker, date, maturity) slice:
+\begin{equation}
+    \hat{\sigma}(k) = \alpha + \beta k + \gamma k^2.
+    \label{eq:smile_fit}
+\end{equation}
+The linear coefficient $\beta$ is our skew measure. OTM calls ($k \geq 0$)
+and OTM puts ($k < 0$) are combined into one cross-section. A minimum of
+three data points is required; slices failing this criterion return
+\texttt{NaN}.
+
+If the exact 15-day maturity is unavailable on a given day, $\beta$ is
+linearly interpolated between the nearest available maturities above and below
+$\tau^*$:
+\begin{equation}
+    \hat{\beta}(\tau^*)
+    = \hat{\beta}(\tau_l)
+      + \frac{\tau^* - \tau_l}{\tau_u - \tau_l}
+        \bigl[\hat{\beta}(\tau_u) - \hat{\beta}(\tau_l)\bigr].
+    \label{eq:interp}
+\end{equation}
+The result is a panel $\{\mathrm{Skew}_{i,t}\}$ pivoted to a wide
+date $\times$ ticker matrix for downstream processing.
+
+\subsection{Stage 2: Idiosyncratic Skew Isolation}
+
+To separate stock-specific skew movements from sector-wide dynamics, we regress
+each stock's skew on the sector ETF (XLF) skew using rolling OLS:
+\begin{equation}
+    \mathrm{Skew}_{i,t} = \alpha_i + \beta_i\,\mathrm{Skew}_{\mathrm{XLF},t}
+    + \varepsilon_{i,t}.
+    \label{eq:factor_model}
+\end{equation}
+Parameters $(\alpha_i, \beta_i)$ are re-estimated each day using only the
+preceding 60 trading days, ensuring no look-ahead bias. The rolling OLS uses
+the standard closed-form estimators:
+\[
+    \hat{\beta}_{i,t}
+    = \frac{\widehat{\mathrm{Cov}}_{60}(\mathrm{Skew}_i,\,\mathrm{Skew}_{\mathrm{XLF}})}
+           {\widehat{\mathrm{Var}}_{60}(\mathrm{Skew}_{\mathrm{XLF}})},
+    \qquad
+    \hat{\alpha}_{i,t} = \bar{S}_{i,t} - \hat{\beta}_{i,t}\,\bar{S}_{\mathrm{XLF},t}.
+\]
+The residual
+\[
+    \varepsilon_{i,t}
+    = \mathrm{Skew}_{i,t} - \hat{\alpha}_{i,t}
+      - \hat{\beta}_{i,t}\,\mathrm{Skew}_{\mathrm{XLF},t}
+\]
+represents idiosyncratic skew: the component unexplained by the sector factor,
+interpreted as a transient mispricing of idiosyncratic tail risk.
+
+\subsection{Stage 3: Signal Construction}
+
+Residuals are standardised into rolling z-scores:
+\begin{equation}
+    z_{i,t}
+    = \frac{\varepsilon_{i,t} - \mu_{\varepsilon_i,t}}{\sigma_{\varepsilon_i,t}},
+    \label{eq:zscore}
+\end{equation}
+where $\mu$ and $\sigma$ are rolling 60-day mean and standard deviation
+of $\varepsilon_{i,t}$.
+
+\subsubsection{Simple Strategy: Hysteresis Filter}
+
+The spot-return strategy uses a two-threshold hysteresis rule to reduce signal
+churn near the entry boundary. Let $s_{i,t} \in \{-1, 0, +1\}$ denote the
+signal. Starting from the previous day's signal $s_{i,t-1}$:
+\begin{itemize}
+    \item From flat: enter long ($+1$) if $z_{i,t} > z_{\mathrm{entry}}$;
+          enter short ($-1$) if $z_{i,t} < -z_{\mathrm{entry}}$.
+    \item Hold long: remain long while $z_{i,t} \geq z_{\mathrm{exit}}$;
+          flip to short if $z_{i,t} < -z_{\mathrm{entry}}$;
+          otherwise exit to flat.
+    \item Hold short: remain short while $z_{i,t} \leq -z_{\mathrm{exit}}$;
+          flip to long if $z_{i,t} > z_{\mathrm{entry}}$;
+          otherwise exit to flat.
+\end{itemize}
+Default parameters: $z_{\mathrm{entry}} = 1.0$, $z_{\mathrm{exit}} = 0.5$.
+The exit threshold $z_{\mathrm{exit}} < z_{\mathrm{entry}}$ creates a hysteresis
+band preventing the signal from toggling on small fluctuations near the
+boundary.
+
+The signal convention is: $s_{i,t} = +1$ (sell skew) means the stock's
+idiosyncratic skew is unusually high and we expect it to revert down, which
+in the spot-return model corresponds to going long the underlying.
+$s_{i,t} = -1$ (buy skew) means the skew is unusually low, corresponding
+to going short the underlying.
+
+\subsubsection{Option Strategy: Hard Threshold}
+
+The risk-reversal strategy uses a simpler hard-threshold rule without
+hysteresis:
+\begin{equation}
+    s_{i,t} =
+    \begin{cases}
+        +1  & z_{i,t} > z_{\mathrm{threshold}}, \\
+        -1  & z_{i,t} < -z_{\mathrm{threshold}}, \\
+        0   & \text{otherwise},
+    \end{cases}
+    \label{eq:signal_threshold}
+\end{equation}
+with $z_{\mathrm{threshold}} = 1.0$. Here $+1$ corresponds to a long risk
+reversal (long call, short put) and $-1$ to a short risk reversal.
+
+\subsection{Stage 4a: Spot-Return Strategy}
+\label{sec:simple_strat}
+
+The first strategy uses the daily spot return as the P\&L driver---a
+simplified proxy for skew trading. Selling skew (long the underlying) profits
+when the stock price rises, loosely consistent with a reduction in implied
+skew. The daily position return is:
+\begin{equation}
+    r^{\mathrm{pos}}_{i,t}
+    = s_{i,t-1} \times r^{\mathrm{spot}}_{i,t},
+    \qquad
+    r^{\mathrm{spot}}_{i,t} = \frac{S_{i,t} - S_{i,t-1}}{S_{i,t-1}}.
+    \label{eq:spot_pnl}
+\end{equation}
+
+Capital is allocated equally across all active positions on each day, with
+a per-position weight cap of $w_{\max} = 20\%$:
+\begin{equation}
+    w_{i,t} = \min\!\left(\frac{1}{N_t^{\mathrm{active}}},\; w_{\max}\right),
+    \label{eq:weight}
+\end{equation}
+where $N_t^{\mathrm{active}} = \sum_i \mathbf{1}[s_{i,t-1} \neq 0]$.
+The gross portfolio return is:
+\begin{equation}
+    R_t^{\mathrm{gross}} = \sum_i w_{i,t}\,r^{\mathrm{pos}}_{i,t}.
+    \label{eq:gross_return}
+\end{equation}
+
+Transaction costs are charged in basis points whenever a position opens,
+closes, or reverses:
+\begin{equation}
+    C_t
+    = \frac{N_t^{\mathrm{trades}}}{\max(N_t^{\mathrm{active}},\,1)}
+      \times \frac{c_{\mathrm{bps}}}{10{,}000},
+    \label{eq:txn_cost}
+\end{equation}
+where $N_t^{\mathrm{trades}}$ counts signal changes on day $t$ and
+$c_{\mathrm{bps}} = 5$ bp (one-way). Net returns are
+$R_t^{\mathrm{net}} = R_t^{\mathrm{gross}} - C_t$.
+
+\subsection{Stage 4b: Delta-Hedged Risk-Reversal Strategy}
+\label{sec:option_strat}
+
+The second strategy trades the underlying options directly. For each
+(ticker, date) with a non-zero signal we construct a \emph{risk reversal}:
+a long OTM call combined with a short OTM put (or vice versa), targeting
+approximately 25-delta and 15 days to expiry.
+
+\subsubsection{Leg Selection}
+
+For each (ticker, date) the legs are selected as follows:
+\begin{enumerate}
+    \item \textbf{OTM call.} Restrict to calls with $k \geq 0$. Among these,
+          find the maturity bucket closest to 15 days, then select the option
+          whose delta is closest to $+0.25$.
+    \item \textbf{OTM put.} Restrict to puts with $k < 0$. Apply the same
+          maturity filter, then select the put whose absolute delta is closest
+          to $0.25$.
+\end{enumerate}
+
+The risk-reversal value is:
+\begin{equation}
+    \mathrm{RR}_{i,t} = p^{\mathrm{call}}_{i,t} - p^{\mathrm{put}}_{i,t},
+    \label{eq:rr_value}
+\end{equation}
+where $p$ denotes mid price. The net delta of a long risk reversal is
+$\Delta^{\mathrm{net}}_{i,t} = \delta^{\mathrm{call}}_{i,t} - \delta^{\mathrm{put}}_{i,t} > 0$
+(put deltas are negative by convention).
+
+\subsubsection{P\&L Decomposition}
+
+The daily P\&L decomposes into an option leg component and a delta-hedge
+component.
+
+\textbf{Option leg return} (normalised by spot price):
+\begin{equation}
+    r^{\mathrm{opt}}_{i,t}
+    = s_{i,t-1}
+      \times \frac{\mathrm{RR}_{i,t} - \mathrm{RR}_{i,t-1}}{S_{i,t-1}}.
+    \label{eq:opt_ret}
+\end{equation}
+
+\textbf{Delta-hedge return} (from a short position in the underlying that
+neutralises the risk reversal's delta):
+\begin{equation}
+    r^{\mathrm{hedge}}_{i,t}
+    = -\,s_{i,t-1}
+      \times \Delta^{\mathrm{net}}_{i,t-1}
+      \times \frac{S_{i,t} - S_{i,t-1}}{S_{i,t-1}}.
+    \label{eq:hedge_ret}
+\end{equation}
+
+The total position return is
+$r^{\mathrm{pos}}_{i,t} = r^{\mathrm{opt}}_{i,t} + r^{\mathrm{hedge}}_{i,t}$.
+Portfolio weighting and transaction costs follow the same scheme as
+equations~\eqref{eq:weight}--\eqref{eq:txn_cost}.
+
+\subsection{Performance Metrics}
+
+Strategy performance is evaluated on daily net returns
+$\{R_t^{\mathrm{net}}\}$ using:
+
+\begin{itemize}
+    \item \textbf{Total and annualised return:}
+          $\mathrm{TR} = \prod_t(1+R_t) - 1$;\quad
+          $\mu = (1+\mathrm{TR})^{252/T} - 1$.
+    \item \textbf{Annualised volatility:}
+          $\sigma = \hat{\sigma}_{R} \times \sqrt{252}$.
+    \item \textbf{Sharpe ratio:}
+          $\mathrm{SR} = (\mu - r_f) / \sigma$.
+    \item \textbf{Maximum drawdown:}
+          $\mathrm{MDD} = \min_t \bigl(V_t / \max_{s \leq t} V_s - 1\bigr)$.
+    \item \textbf{Calmar ratio:} $\mu / |\mathrm{MDD}|$.
+    \item \textbf{Win rate, skewness, and excess kurtosis} of daily returns.
+\end{itemize}
+
+Both gross (pre-cost) and net (post-cost) versions are reported.
+
+% ---------------------------------------------------------------------------
+\section{Results}
+\label{sec:results}
+% ---------------------------------------------------------------------------
+
+\subsection{Signal Diagnostics}
+
+% TODO: Include z-score time-series plot and signal heatmap figures.
+
+\subsection{Spot-Return Strategy Performance}
+
+% TODO: Fill in metrics from simple_strat backtest.
+
+\begin{table}[H]
+    \centering
+    \caption{Spot-Return Strategy Performance Summary (2018--2022)}
+    \label{tab:simple_metrics}
+    \begin{tabular}{lrr}
+        \toprule
+        Metric & Gross & Net \\
+        \midrule
+        Total Return        & -- & -- \\
+        Ann.\ Return        & -- & -- \\
+        Ann.\ Volatility    & -- & -- \\
+        Sharpe Ratio        & -- & -- \\
+        Max Drawdown        & -- & -- \\
+        Calmar Ratio        & -- & -- \\
+        Win Rate            & -- & -- \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+% TODO: Insert cumulative return and drawdown figures.
+
+\subsection{Delta-Hedged Risk-Reversal Strategy Performance}
+
+% TODO: Fill in metrics from option_skew_strategy backtest.
+
+\begin{table}[H]
+    \centering
+    \caption{Risk-Reversal Strategy Performance Summary (2018--2022)}
+    \label{tab:option_metrics}
+    \begin{tabular}{lrr}
+        \toprule
+        Metric & Gross & Net \\
+        \midrule
+        Total Return        & -- & -- \\
+        Ann.\ Return        & -- & -- \\
+        Ann.\ Volatility    & -- & -- \\
+        Sharpe Ratio        & -- & -- \\
+        Max Drawdown        & -- & -- \\
+        Calmar Ratio        & -- & -- \\
+        Win Rate            & -- & -- \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+% TODO: Insert cumulative return, drawdown, and P&L decomposition figures.
+
+% ---------------------------------------------------------------------------
+\section{Conclusion}
+\label{sec:conclusion}
+% ---------------------------------------------------------------------------
+
+% TODO: Summarise key findings, limitations, and potential extensions.
+%
+% Suggested points:
+% - Did idiosyncratic skew exhibit mean-reversion over the sample period?
+% - How did the option strategy compare to the simpler spot proxy?
+% - Impact of transaction costs and the 2020 COVID volatility spike on results.
+% - Limitations: mid-price optimism (ignores bid-ask spread), no pin risk
+%   or early assignment modelling, single-sector universe, contract
+%   rolling not modelled explicitly.
+% - Extensions: SVI-based skew estimation, cross-sector universe,
+%   vega-neutral portfolio construction, dynamic entry threshold tuning.
+
+\newpage
+\bibliographystyle{plain}
+\begin{thebibliography}{9}
+
+\bibitem{gatheral2014}
+J.~Gatheral and A.~Jacquier.
+\newblock Arbitrage-free {SVI} volatility surfaces.
+\newblock \emph{Quantitative Finance}, 14(1):59--71, 2014.
+
+\end{thebibliography}
+
+\end{document}

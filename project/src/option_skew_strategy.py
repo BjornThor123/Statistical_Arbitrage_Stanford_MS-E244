@@ -3,7 +3,7 @@ Option skew arbitrage strategy — risk reversal P&L model.
 
 Pipeline
 --------
-1. Extract idiosyncratic skew signal (reuses construct_skew pipeline).
+1. Load pre-computed skew from parquet (run src.data_cleaning.extract_skew first).
 2. For each (ticker, date), select OTM put and call legs (~25-delta, ~15 tte).
 3. Construct daily risk-reversal series: RR = call_mid - put_mid.
 4. Signal drives direction:
@@ -31,7 +31,7 @@ import pandas as pd
 import seaborn as sns
 
 from src.config import get_config
-from src.construct_skew import extract_skew_df, compute_idiosyncratic_skew
+from src.construct_skew import compute_idiosyncratic_skew
 from src.data_loader import DataLoader
 
 config = get_config()
@@ -187,11 +187,12 @@ def run_strategy(
     entry_threshold: float = config.entry_threshold,
     exit_threshold: float = config.exit_threshold,
     sector_ticker: str = config.sector_ticker,
+    skew_path: Path | str = config.skew_path,
 ) -> dict:
     """
     Full strategy pipeline:
 
-    1. Extract skew β per ticker/date.
+    1. Load pre-computed skew from parquet (produced by src.data_cleaning.extract_skew).
     2. Compute idiosyncratic skew residuals vs sector ETF.
     3. Generate z-score signals.
     4. Select risk-reversal legs (OTM put + OTM call) per ticker/date.
@@ -201,8 +202,8 @@ def run_strategy(
     dict with keys:
         skew_df, skew_pivot, resid_df, z_scores, signals, rr_legs
     """
-    print("Step 1/4  Extracting skew...")
-    skew_df = extract_skew_df(df, tte_days=tte_days)
+    print("Step 1/4  Loading skew from parquet...")
+    skew_df = pd.read_parquet(skew_path)
 
     skew_pivot = (
         skew_df.reset_index()

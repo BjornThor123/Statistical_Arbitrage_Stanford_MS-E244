@@ -6,13 +6,20 @@ from pathlib import Path
 @dataclass(frozen=True)
 class Config:
     data_path: Path = Path("project/data")
+    skew_path: Path = Path("project/data/skew.parquet")
+    cleaned_options_path: Path = Path("project/data/cleaned_options.parquet")
     plot_dir: Path = Path("project/plots")
-    start_date: datetime = datetime(2014, 1, 1)
-    end_date: datetime = datetime(2018, 12, 31)
+    start_date: datetime = datetime(2015, 1, 1)
+    end_date: datetime = datetime(2019, 12, 31)
+    tte_target: int = 15
     max_tte: int = 30
     sector_ticker = "XLF"
-    entry_threshold: float = 2.0
-    exit_threshold: float = 0.5
+    entry_threshold: float = 1.5
+    exit_threshold: float = 0.0
+    delta_target: float = 0.25
+    initial_capital: float = 1_000_000.0
+    transaction_cost_bps: float = 0.5
+    max_position_frac: float = 0.20
 
     relevant_option_columns: List[str] = field(default_factory=lambda: [
         "secid",
