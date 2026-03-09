@@ -78,30 +78,29 @@
 %=============================================================
 
 \begin{frame}{Step 1 --- Constructing the Skew}
-  \textbf{For each day and each ticker:}
-  \vspace{0.5em}
+  \textbf{For each day and each ticker, fix a target $\tau^*$ and $\Delta^* = 0.25$:}
+  \vspace{0.4em}
   \begin{enumerate}
-    \item Fix a target time-to-expiration $\tau^*$
-    \begin{itemize}
-      \item If $\tau^*$ is unavailable, linearly interpolate from the two
-            nearest available maturities
-    \end{itemize}
-    \item Use \textbf{OTM calls and OTM puts only}
-    \begin{itemize}
-      \item Higher liquidity; avoids early-exercise noise
-      \item Future extension: weight by open interest
-    \end{itemize}
-    \item Fit a \textbf{second-degree polynomial} to the implied volatility smile
-          as a function of log-moneyness $\kappa = \log(K/S)$:
+    \item Use \textbf{OTM options only} (higher liquidity; avoids early-exercise noise)
+    \item Select the expiry nearest to $\tau^*$
+    \item Find the OTM put and OTM call whose $|\Delta|$ is closest to $\Delta^*$
+    \item Define the skew as the \textbf{25-delta risk-reversal IV spread}:
     \[
-      \sigma_{IV}(\kappa) \approx \beta_0 + \beta_1 \kappa + \beta_2 \kappa^2
+      \text{skew}_t \;=\; \sigma^{\text{put}}_{25\Delta,\,t} \;-\; \sigma^{\text{call}}_{25\Delta,\,t}
     \]
-    \item Interpret $\hat{\beta}_1$ as the \textbf{skew}
   \end{enumerate}
-  \vspace{0.3em}
-  \begin{alertblock}{Alternative}
-    More advanced techniques (e.g.\ signature methods, SVI parametrisation)
-    could capture higher-order surface geometry.
+  \vspace{0.2em}
+  \begin{block}{Why this measure?}
+    The skew is \emph{positive when puts are expensive} and measures exactly the
+    options we trade in the risk reversal --- signal and instrument are aligned
+    by construction.
+  \end{block}
+  \vspace{0.2em}
+  \begin{alertblock}{Alternative: polynomial fit}
+    Fit $\sigma_{IV}(\kappa) \approx \beta_0 + \beta_1\kappa + \beta_2\kappa^2$
+    to all OTM options and use $-\hat\beta_1$ as the skew proxy
+    (negated so that high $= $ puts expensive).
+    Smoother but less directly tied to the 25$\Delta$ strikes actually traded.
   \end{alertblock}
 \end{frame}
 
@@ -214,7 +213,7 @@
     \column{0.5\textwidth}
       \textbf{Summary}
       \begin{itemize}
-        \item Extracted skew from option surface via polynomial fit
+        \item Extracted skew as the 25$\Delta$ put--call IV spread
         \item Traded cointegrated stock--sector skew spread
         \item Delta-hedged to isolate skew signal
       \end{itemize}
@@ -223,7 +222,7 @@
       \begin{itemize}
         \item Use full volatility surface (not just one $\tau$)
         \item Weight by open interest
-        \item SVI / signature-method skew parametrisation
+        \item SVI / signature-method skew parametrisation (beyond polynomial fit)
         \item Richer cointegration models (Engle-Granger, Johansen)
         \item Transaction cost modelling
       \end{itemize}

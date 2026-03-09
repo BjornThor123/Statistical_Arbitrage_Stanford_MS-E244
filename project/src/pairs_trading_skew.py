@@ -100,6 +100,7 @@ def select_risk_reversal_legs(
         puts  = group[(group["cp_flag"] == "P") & (group["log_moneyness"] <  0)].copy()
 
         if calls.empty or puts.empty:
+            print(f"Missing data for {ticker} on {date}")
             continue
 
         # Step 1: filter to closest tte_days
@@ -119,6 +120,7 @@ def select_risk_reversal_legs(
 
         # Skip if mid prices are missing
         if pd.isna(best_call["mid_price"]) or pd.isna(best_put["mid_price"]):
+            print(f"Missing mid price for {ticker} on {date}")
             continue
 
         contract_size = float(group["contract_size"].iloc[0]) if "contract_size" in group.columns else 100.0

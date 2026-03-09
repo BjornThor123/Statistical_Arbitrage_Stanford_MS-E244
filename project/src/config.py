@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Literal
 from datetime import datetime
 from pathlib import Path
 
@@ -10,13 +10,17 @@ class Config:
     cleaned_options_path: Path = Path("project/data/cleaned_options.parquet")
     plot_dir: Path = Path("project/plots")
     start_date: datetime = datetime(2015, 1, 1)
-    end_date: datetime = datetime(2019, 12, 31)
-    tte_target: int = 15
-    max_tte: int = 30
+    end_date: datetime = datetime(2020, 12, 31)
+    tte_target: int = 30
+    max_tte: int = 40
     sector_ticker = "XLF"
-    entry_threshold: float = 1.5
+    entry_threshold: float = 1.0
     exit_threshold: float = 0.0
     delta_target: float = 0.25
+    # Skew measure used for signal construction.
+    # "direct"     — IV_25Δ_put − IV_25Δ_call at tte_target (matches the traded instrument)
+    # "polynomial" — −β from IV = α + β·log(K/F) + γ·log(K/F)² (negated so high = puts expensive)
+    skew_method: Literal["direct", "polynomial"] = "direct"
     initial_capital: float = 1_000_000.0
     transaction_cost_bps: float = 0.5
     max_position_frac: float = 0.20

@@ -17,17 +17,40 @@ from src.utils.black_scholes import impute_impl_vol_bs
 config = get_config()
 
 
-def extract_skew_df(df, tte_days=15, min_points=3, verbose=True) -> tuple[pd.DataFrame, pd.DataFrame]:
+def extract_skew_df(
+    df,
+    tte_days: int = 15,
+    min_points: int = 3,
+    skew_method: str = "direct",
+    delta_target: float = 0.25,
+    verbose: bool = True,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
-    For each ticker and date, fit:
-        IV = α + β·log(K/F) + γ·log(K/F)²
-    using OTM calls and puts. Return β (the skew slope) at the given tte_days
-    via linear interpolation between adjacent maturities when needed.
+    For each ticker and date, compute an IV skew measure.
+
+    Two methods are supported (controlled by skew_method):
+
+    "direct" (default)
+        skew = IV_put(Δ≈delta_target) − IV_call(Δ≈delta_target)
+        Selects the OTM put and call closest to delta_target at the expiry
+        nearest to tte_days. Positive when puts are expensive — consistent
+        with the risk-reversal instrument actually traded.
+
+    "polynomial"
+        Fits  IV = α + β·log(K/F) + γ·log(K/F)²  across all OTM options,
+        interpolating linearly between adjacent maturities when tte_days is
+        not available exactly. Returns −β so that the sign convention matches
+        "direct" (high = puts expensive; β is negative in equity markets).
+
+    Both methods share the same data-cleaning pipeline (imputation, tte ≥ 4,
+    IV ≤ 90th-percentile clip).
 
     Returns (skew_df, cleaned_options_df) where:
       - skew_df has columns [skew, ticker] indexed by date
-      - cleaned_options_df is the concatenation of all cleaned per-ticker option slices
+      - cleaned_options_df is the concatenation of all cleaned per-ticker slices
     """
+
+    # ── Polynomial helpers ────────────────────────────────────────────────────
 
     def _compute_beta(slice_df):
         if len(slice_df) < min_points:
@@ -35,7 +58,7 @@ def extract_skew_df(df, tte_days=15, min_points=3, verbose=True) -> tuple[pd.Dat
         x = slice_df['log_moneyness'].values
         iv = slice_df['impl_volatility'].values
         coeff = np.polyfit(x, iv, deg=2)
-        return coeff[1]  # [γ, β, α] → coeff[1] is β (skew)
+        return coeff[1]  # [γ, β, α] → coeff[1] is β (skew slope)
 
     def _run_regression(day_df):
         available_ttes = np.sort(day_df['tte_days'].unique())
@@ -58,6 +81,36 @@ def extract_skew_df(df, tte_days=15, min_points=3, verbose=True) -> tuple[pd.Dat
 
         w = (tte_days - tau_l) / (tau_u - tau_l)
         return beta_l + w * (beta_u - beta_l)
+
+    # ── Direct 25Δ helper ─────────────────────────────────────────────────────
+
+    def _compute_direct_skew(day_df):
+        """Return IV_put(Δ≈delta_target) − IV_call(Δ≈delta_target)."""
+        available_ttes = day_df['tte_days'].unique()
+        closest_tte = available_ttes[
+            np.argmin(np.abs(available_ttes - tte_days))
+        ]
+        slice_df = day_df[day_df['tte_days'] == closest_tte]
+
+        calls = slice_df[(slice_df['cp_flag'] == 'C') & (slice_df['log_moneyness'] >= 0)].copy()
+        puts  = slice_df[(slice_df['cp_flag'] == 'P') & (slice_df['log_moneyness'] <  0)].copy()
+
+        if calls.empty or puts.empty:
+            return np.nan
+
+        calls['delta_dist'] = (calls['delta'] - delta_target).abs()
+        puts['delta_dist']  = (puts['delta'].abs() - delta_target).abs()
+
+        best_call_iv = calls.loc[calls['delta_dist'].idxmin(), 'impl_volatility']
+        best_put_iv  = puts.loc[puts['delta_dist'].idxmin(),  'impl_volatility']
+
+        if np.isnan(best_call_iv) or np.isnan(best_put_iv):
+            return np.nan
+
+        # Positive when puts expensive (matches: high spread → sell puts → long RR)
+        return float(best_put_iv) - float(best_call_iv)
+
+    # ── Per-ticker loop ───────────────────────────────────────────────────────
 
     tickers = df['ticker'].unique()
     skew_dfs = []
@@ -84,9 +137,14 @@ def extract_skew_df(df, tte_days=15, min_points=3, verbose=True) -> tuple[pd.Dat
         df_stock = df_stock.loc[clean_filters]
         cleaned_stock_dfs.append(df_stock)
 
-        skew_series = df_stock.groupby('date')[
-            ['log_moneyness', 'impl_volatility', 'tte_days']
-        ].apply(_run_regression)
+        if skew_method == "direct":
+            skew_series = df_stock.groupby('date').apply(_compute_direct_skew)
+        else:  # polynomial
+            # Negate β: in equity markets β < 0 (puts expensive), so −β > 0,
+            # giving the same sign convention as the direct method.
+            skew_series = -df_stock.groupby('date')[
+                ['log_moneyness', 'impl_volatility', 'tte_days']
+            ].apply(_run_regression)
 
         skew_sub_df = skew_series.rename('skew').to_frame()
         skew_sub_df['ticker'] = ticker
@@ -105,7 +163,12 @@ def main():
     )
     df = loader.query(query)
 
-    skew_df, cleaned_options_df = extract_skew_df(df, tte_days=15)
+    skew_df, cleaned_options_df = extract_skew_df(
+        df,
+        tte_days=config.tte_target,
+        skew_method=config.skew_method,
+        delta_target=config.delta_target,
+    )
 
     out_path = config.skew_path
     out_path.parent.mkdir(parents=True, exist_ok=True)
