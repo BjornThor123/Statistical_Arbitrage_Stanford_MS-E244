@@ -11,8 +11,8 @@ class Config:
     plot_dir: Path = Path("project/plots")
     start_date: datetime = datetime(2015, 1, 1)
     end_date: datetime = datetime(2020, 12, 31)
-    tte_target: int = 30
-    max_tte: int = 40
+    tte_target: int = 15
+    max_tte: int = 30
     sector_ticker = "XLF"
     entry_threshold: float = 1.0
     exit_threshold: float = 0.0
@@ -22,7 +22,13 @@ class Config:
     # "polynomial" — −β from IV = α + β·log(K/F) + γ·log(K/F)² (negated so high = puts expensive)
     skew_method: Literal["direct", "polynomial"] = "direct"
     initial_capital: float = 1_000_000.0
-    transaction_cost_bps: float = 0.5
+    # Transaction cost in bps of the total option mid-price (call + put) per RR leg traded.
+    # Costs are applied proportionally to option value, not stock price.
+    # Rough real-world calibration for single-name equity options:
+    #   ~200–500 bps of option value = typical bid-ask half-spread
+    #   ~50–100 bps            = tight/liquid execution (e.g. market-maker access)
+    #   ~10–30 bps             = very optimistic lower bound
+    transaction_cost_bps: float = 50
     max_position_frac: float = 0.20
 
     relevant_option_columns: List[str] = field(default_factory=lambda: [

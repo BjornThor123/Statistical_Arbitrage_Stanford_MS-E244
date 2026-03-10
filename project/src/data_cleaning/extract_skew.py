@@ -58,7 +58,7 @@ def extract_skew_df(
         x = slice_df['log_moneyness'].values
         iv = slice_df['impl_volatility'].values
         coeff = np.polyfit(x, iv, deg=2)
-        return coeff[1]  # [γ, β, α] → coeff[1] is β (skew slope)
+        return -coeff[1]  # [γ, β, α] → coeff[1] is β (skew slope)
 
     def _run_regression(day_df):
         available_ttes = np.sort(day_df['tte_days'].unique())

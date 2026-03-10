@@ -433,11 +433,55 @@ def compute_portfolio_returns(
 
     gross_returns = pair_ret.multiply(weight, axis=0).sum(axis=1)
 
-    # ── Transaction costs (both legs) ────────────────────────────────────────
-    signal_changes = (signals != signals.shift(1)) & (signals != 0)
-    n_trades = signal_changes.sum(axis=1)
-    # Each pair change incurs cost on 2 legs
-    txn_cost = (n_trades / n_active.clip(lower=1)) * (2 * transaction_cost_bps / 10_000)
+    # ── Transaction costs ─────────────────────────────────────────────────────
+    # Options are bought/sold at the option price, so transaction costs scale
+    # with the option mid-price, not the underlying stock price. We express the
+    # cost in the same units as gross_returns (i.e. as a fraction of spot) by
+    # multiplying bps by the option-to-spot ratio:
+    #
+    #   cost_per_rr_pair = bps/10000 × [(call_mid + put_mid)/spot   ← stock leg
+    #                                  + |β| × (sec_call + sec_put)/sec_spot]  ← sector leg
+    #
+    # Transition types and number of complete RR pair trades they incur:
+    #   Entry (0 → ±1):  1 pair opened
+    #   Exit  (±1 → 0):  1 pair closed
+    #   Flip  (±1 → ∓1): 2 pairs (close old + open new)
+
+    prev_sig = signals.shift(1).fillna(0).astype(int)
+    entering = (signals != 0) & (prev_sig == 0)
+    exiting  = (signals == 0) & (prev_sig != 0)
+    flipping = (signals != 0) & (prev_sig != 0) & (signals != prev_sig)
+
+    rr_pair_trades = entering.astype(float) + exiting.astype(float) + flipping.astype(float) * 2
+
+    # Stock leg option value as fraction of spot
+    stock_call_mid = stock_rr_legs["call_mid"].unstack("ticker")
+    stock_put_mid  = stock_rr_legs["put_mid"].unstack("ticker")
+    stock_call_mid.index = pd.to_datetime(stock_call_mid.index)
+    stock_put_mid.index  = pd.to_datetime(stock_put_mid.index)
+    stock_call_mid = stock_call_mid.reindex(common_idx)[common_tickers]
+    stock_put_mid  = stock_put_mid.reindex(common_idx)[common_tickers]
+    stock_opt_ratio = (stock_call_mid + stock_put_mid) / stock_spot  # typically 3–8%
+
+    # Sector leg option value as fraction of sector spot (β-scaled)
+    sec_call_mid_s = sector_rr_legs["call_mid"].xs(sector_ticker, level="ticker")
+    sec_put_mid_s  = sector_rr_legs["put_mid"].xs(sector_ticker, level="ticker")
+    sec_call_mid_s.index = pd.to_datetime(sec_call_mid_s.index)
+    sec_put_mid_s.index  = pd.to_datetime(sec_put_mid_s.index)
+    sec_opt_ratio = (
+        sec_call_mid_s.reindex(common_idx) + sec_put_mid_s.reindex(common_idx)
+    ) / sec_spot  # typically 1–4%
+
+    # Cost per 1 complete RR pair trade as fraction of stock spot
+    cost_per_rr_pair = (transaction_cost_bps / 10_000) * (
+        stock_opt_ratio
+        + lagged_beta.abs().multiply(sec_opt_ratio.values, axis="index")
+    )
+
+    txn_cost = (cost_per_rr_pair * rr_pair_trades).multiply(weight, axis=0).sum(axis=1)
+
+    # Diagnostic: RR pair trades per day
+    n_trades = rr_pair_trades.sum(axis=1)
 
     net_returns = gross_returns - txn_cost
 
@@ -492,9 +536,9 @@ def compute_metrics(metrics_df: pd.DataFrame, risk_free_rate: float = 0.0) -> di
         results[f"{label} Skewness"]        = r.skew()
         results[f"{label} Kurtosis"]        = r.kurtosis()
 
-    results["Avg Active Positions"]   = metrics_df["active_positions"].mean()
-    results["Avg Daily Trades"]       = metrics_df["n_trades"].mean()
-    results["Total Transaction Cost"] = metrics_df["transaction_cost"].sum()
+    results["Avg Active Positions"]      = metrics_df["active_positions"].mean()
+    results["Avg Daily RR Legs Traded"] = metrics_df["n_trades"].mean()
+    results["Total Transaction Cost"]   = metrics_df["transaction_cost"].sum()
 
     return results
 
