@@ -109,6 +109,52 @@ def extract_skew_df(
 
         # Positive when puts expensive (matches: high spread → sell puts → long RR)
         return float(best_put_iv) - float(best_call_iv)
+    
+    def _compute_vega_hedge_skew(day_df,tte_days = 15, delta_target = 0.25, reference = "atm"):
+        available_ttes = day_df["tte_days"].dropna().unique()
+        if len(available_ttes) == 0:
+            return np.nan
+        
+        closest_tte = available_ttes[np.argmin(np.abs(available_ttes-tte_days))]
+
+        slice_df = day_df[day_df["tte_days"] == closest_tte].copy()
+
+        if slice_df.empty:
+            return np.nan
+        
+        puts = slice_df[slice_df["cp_flag"] == "P"].copy()
+
+        if puts.empty:
+            return np.nan
+
+        puts["delta_dist"] = (puts["delta"].abs() - delta_target).abs()
+        put25 = puts.loc[puts["delta_dist"].idxmin()]
+
+        sigma_25p = put25["impl_volatility"]
+        vega_25p = put25["vega"]
+
+        if reference == "atm":
+            atm_candidate = slice_df.copy()
+            atm_candidate["atm_distance"] = atm_candidate["log_moneyness"].abs()
+            atm_row = atm_candidate.loc[atm_candidate["atm_distance"].idxmin()]
+
+            sigma_ref = atm_row["impl_volatility"]
+            vega_ref = atm_row["vega"]
+        else:
+            return np.nan
+        
+        if pd.isna(sigma_25p) or pd.isna(vega_25p) or pd.isna(sigma_ref) or pd.isna(vega_ref):
+            return np.nan
+        
+        if vega_ref == 0:
+            return np.nan
+
+        h_t = vega_25p / vega_ref
+
+        vh_skew = sigma_25p - h_t * sigma_ref
+
+        return vh_skew
+
 
     # ── Per-ticker loop ───────────────────────────────────────────────────────
 
@@ -135,22 +181,47 @@ def extract_skew_df(
             (df_stock['impl_volatility'] <= df_stock['impl_volatility'].quantile(q=0.9))
         )
         df_stock = df_stock.loc[clean_filters]
+
         cleaned_stock_dfs.append(df_stock)
 
         if skew_method == "direct":
             skew_series = df_stock.groupby('date').apply(_compute_direct_skew)
+        elif skew_method == "vega_hedged":
+            skew_series = df_stock.groupby('date').apply(_compute_vega_hedge_skew, tte_days = tte_days, delta_target = delta_target, reference = "atm")
         else:  # polynomial
-            # Negate β: in equity markets β < 0 (puts expensive), so −β > 0,
-            # giving the same sign convention as the direct method.
             skew_series = -df_stock.groupby('date')[
                 ['log_moneyness', 'impl_volatility', 'tte_days']
             ].apply(_run_regression)
 
+        if ticker == 'XLF':
+            print("XLF skew head:")
+            print(skew_series.head())
+            print("XLF non-NaN skew count:", skew_series.notna().sum())
+            print("XLF total skew count:", len(skew_series))
+
+        if isinstance(skew_series, pd.DataFrame):
+            skew_series = skew_series.iloc[:, 0]
+
         skew_sub_df = skew_series.rename('skew').to_frame()
         skew_sub_df['ticker'] = ticker
+
+        if ticker == "XLF":
+            print("XLF skew_sub_df head:")
+            print(skew_sub_df.head())
+            print("XLF skew_sub_df shape:", skew_sub_df.shape)
+
         skew_dfs.append(skew_sub_df)
 
-    return pd.concat(skew_dfs), pd.concat(cleaned_stock_dfs)
+    #return pd.concat(skew_dfs), pd.concat(cleaned_stock_dfs)
+    
+    out_skew = pd.concat(skew_dfs)
+    out_clean = pd.concat(cleaned_stock_dfs)
+
+    print("Final skew tickers:", out_skew.reset_index()["ticker"].unique())
+    print(out_skew.reset_index()["ticker"].value_counts())
+
+    return out_skew, out_clean
+
 
 
 def main():

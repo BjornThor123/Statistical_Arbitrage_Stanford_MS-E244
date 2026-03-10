@@ -5,10 +5,10 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class Config:
-    data_path: Path = Path("project/data")
-    skew_path: Path = Path("project/data/skew.parquet")
-    cleaned_options_path: Path = Path("project/data/cleaned_options.parquet")
-    plot_dir: Path = Path("project/plots")
+    data_path: Path = Path("data")
+    skew_path: Path = Path("data/skew.parquet")
+    cleaned_options_path: Path = Path("data/cleaned_options.parquet")
+    plot_dir: Path = Path("plots")
     start_date: datetime = datetime(2015, 1, 1)
     end_date: datetime = datetime(2020, 12, 31)
     tte_target: int = 15
@@ -20,7 +20,7 @@ class Config:
     # Skew measure used for signal construction.
     # "direct"     — IV_25Δ_put − IV_25Δ_call at tte_target (matches the traded instrument)
     # "polynomial" — −β from IV = α + β·log(K/F) + γ·log(K/F)² (negated so high = puts expensive)
-    skew_method: Literal["direct", "polynomial"] = "direct"
+    skew_method: Literal["direct", "vega_hedged", "polynomial"] = "direct"
     initial_capital: float = 1_000_000.0
     # Transaction cost in bps of the total option mid-price (call + put) per RR leg traded.
     # Costs are applied proportionally to option value, not stock price.
