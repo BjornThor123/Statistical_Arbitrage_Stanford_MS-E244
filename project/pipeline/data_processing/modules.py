@@ -9,6 +9,16 @@ import pandas as pd
 
 from interfaces import DataLoaderModule, DataProcessorModule, LoadedData, ProcessedData, RunSpec
 
+"""
+Data loading and processing.
+
+DuckDBOptionsLoader   — queries options_enriched from DuckDB for the requested tickers/dates.
+BasicOptionsProcessor — cleans raw quotes and computes log-moneyness k and maturity t:
+  - Filters bad IV, zero prices, zero open interest + volume
+  - Estimates the forward price F from put-call parity (linear regression of C-P on K)
+  - Computes k = ln(K/F),  t = (exdate - date) / 365
+"""
+
 
 @dataclass
 class DuckDBOptionsLoader(DataLoaderModule):
@@ -56,6 +66,7 @@ class BasicOptionsProcessor(DataProcessorModule):
     min_t: float = 1.0 / 365.0
     max_t: float = 2.5
     max_abs_k: float = 1.5
+    iv_upper_percentile: float | None = None  # e.g. 99.0 drops top 1% of IV per ticker-date
 
     def _estimate_forward(self, df: pd.DataFrame) -> Dict[tuple[str, str], float]:
         out: Dict[tuple[str, str], float] = {}
@@ -83,10 +94,8 @@ class BasicOptionsProcessor(DataProcessorModule):
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
         df["exdate"] = pd.to_datetime(df["exdate"], errors="coerce")
         df["sigma"] = pd.to_numeric(df["impl_volatility"], errors="coerce")
-        df["strike"] = pd.to_numeric(df["strike_price"], errors="coerce") / 1000.0
-        bid = pd.to_numeric(df["best_bid"], errors="coerce")
-        ask = pd.to_numeric(df["best_offer"], errors="coerce")
-        df["mid"] = 0.5 * (bid + ask)
+        df["strike"] = pd.to_numeric(df["strike_price"], errors="coerce") / 1000.0  # raw data stores strike in cents
+        df["mid"] = 0.5 * (pd.to_numeric(df["best_bid"], errors="coerce") + pd.to_numeric(df["best_offer"], errors="coerce"))
         df["open_interest"] = pd.to_numeric(df["open_interest"], errors="coerce")
         df["volume"] = pd.to_numeric(df["volume"], errors="coerce")
 
@@ -96,6 +105,11 @@ class BasicOptionsProcessor(DataProcessorModule):
         df = df[(df["sigma"] >= self.min_sigma) & (df["sigma"] <= self.max_sigma)]
         df = df[(df["strike"] > 0.0) & (df["mid"] > 0.0)]
         df = df[df["open_interest"].fillna(0.0) + df["volume"].fillna(0.0) > 0.0]
+        if self.iv_upper_percentile is not None:
+            cutoff = df.groupby("date")["sigma"].transform(
+                lambda s: np.percentile(s, self.iv_upper_percentile)
+            )
+            df = df[df["sigma"] <= cutoff]
 
         fwd_map = self._estimate_forward(df)
         if not fwd_map:

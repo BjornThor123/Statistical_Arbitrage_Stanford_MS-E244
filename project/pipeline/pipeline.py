@@ -1,8 +1,37 @@
+"""
+Main pipeline orchestrator.
+
+Quickstart
+----------
+from pipeline import Pipeline, MasterRunSpec, DataSpec
+
+cfg = MasterRunSpec(
+    data=DataSpec(
+        tickers=["XLF", "GS", "JPM", "BAC", "C"],
+        start_date="2008-01-01",
+        end_date="2008-12-31",
+    ),
+)
+p = Pipeline(cfg)
+
+# Run individual stages (results can be cached to disk with saved='filename.parquet'):
+loaded    = p.run_load()
+processed = p.run_process(loaded)
+modeled   = p.run_model(processed)
+skew      = p.run_skew(modeled)
+signals   = p.run_signals(skew)
+backtest  = p.run_backtest(signals, skew)
+
+print(backtest.summary)
+
+# Alternatively, run everything in one call:
+output = p.run()
+"""
 from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Dict, List, Literal
 
@@ -24,117 +53,103 @@ from interfaces import (
 
 
 @dataclass
-class PipelineConfig:
+class DataSpec:
     tickers: List[str]
     start_date: str
     end_date: str
-    model_kind: Literal["surface", "smile"] = "surface"
     db_table: str = "options_enriched"
-    ssvi_calibration_backend: str = "auto"  # auto, cpu, mps, cuda
-    ssvi_random_seed: int = 42
-    ssvi_n_param_steps: int = 300
+    iv_upper_percentile: float | None = None  # e.g. 99.0 drops top 1% of IV per date
+
+
+@dataclass
+class VolatilityModelSpec:
+    model_kind: Literal["surface", "smile"] = "surface"
     ssvi_n_theta_steps: int = 3
     ssvi_n_restarts: int = 4
-    ssvi_theta_smoothness_lambda: float = 2e-3
-    skew_technique: str = "local_derivative"
-    skew_delta_k: float = 0.01
-    skew_rr_k: float = 0.25
-    signal_regression_window: int = 60
-    signal_min_regression_obs: int = 40
-    signal_zscore_window: int = 60
-    signal_entry_z: float = 1.25
-    signal_exit_z: float = 0.30
-    signal_min_hold_days: int = 3
-    signal_max_abs_position: float = 1.0
-    signal_min_liquidity_points: float = 150.0
-    signal_max_fit_rmse_iv: float = 0.60
-    signal_edge_horizon_days: int = 5
-    signal_edge_cost_buffer: float = 0.25
-    signal_half_spread_cost: float = 0.02
-    signal_commission_cost: float = 0.005
-    signal_direction: str = "auto"
-    signal_model_kind: str = "risk_reversal"  # risk_reversal | residual
-    signal_cross_section_top_k: int = 2
-    signal_cross_section_bottom_k: int = 2
-    signal_max_name_weight: float = 0.35
-    signal_max_gross_leverage: float = 1.5
-    signal_vol_target_daily: float = 0.02
-    signal_auto_sign_window: int = 63
-    signal_winsor_quantile: float = 0.02
-    signal_use_mad_zscore: bool = True
-    signal_regime_sector_vol_window: int = 21
-    signal_regime_sector_abs_z_max: float = 3.0
-    signal_regime_sector_vol_z_max: float = 2.0
-    signal_factor_model: str = "sector"  # pca | sector
-    signal_n_pca_factors: int = 2
-    signal_benchmark_preference: str = "XLF"
-    backtest_stock_fee_bps: float = 1.0
-    backtest_option_fee_per_contract: float = 0.65
-    backtest_sizing_mode: str = "contracts"  # contracts | dollar_vega
-    backtest_max_contracts_per_signal: float = 10.0
-    backtest_target_dollar_vega_per_signal: float = 20000.0
-    backtest_roll_threshold_days: int = 5
-    backtest_rr_put_log_moneyness: float = -0.15
-    backtest_rr_call_log_moneyness: float = 0.15
+
+
+@dataclass
+class SkewSpec:
+    technique: str = "local_derivative"
+    delta_k: float = 0.01
+    # Single source of truth for risk-reversal wing width.
+    # Used by GenericSkewCalculator (rr_k) AND DeltaHedgedOptionBacktestEngine
+    # (rr_put_log_moneyness = -rr_k, rr_call_log_moneyness = +rr_k).
+    rr_k: float = 0.15
+    # When rr_delta > 0, skew is evaluated at the log-moneyness corresponding to
+    # this BS delta (e.g. 0.25 = 25-delta RR). Set to 0.0 to use fixed rr_k instead.
+    rr_delta: float = 0.25
+    # Maturities (in calendar days) at which skew is evaluated each day.
+    # All downstream consumers (signal, backtest) select the tenor they need.
+    tenor_days: List[int] = field(default_factory=lambda: [30, 60, 90])
+
+
+@dataclass
+class SignalSpec:
+    model_kind: str = "risk_reversal"  # risk_reversal | residual | momentum
+    regression_window: int = 20
+    min_regression_obs: int = 20
+    zscore_window: int = 20
+    entry_z: float = 3
+    exit_z: float = 0.30
+    min_hold_days: int = 1
+    min_liquidity_points: float = 20
+    max_fit_rmse_iv: float = 0.50
+    direction: str = "mean_revert"  # mean_revert | momentum
+    cross_section_top_k: int = 2
+    cross_section_bottom_k: int = 2
+    max_gross_leverage: float = 1.5
+    benchmark_preference: str = "XLF"
+    # Which tenor (calendar days) drives the z-score signal and execution.
+    # Must be one of the values in model.tenor_days.
+    trade_tenor_days: int = 30
+    # Event filter: flag days where the term-structure slope (shortest vs longest
+    # tenor in model.tenor_days) z-score exceeds this threshold.
+    ts_event_threshold: float = 2.0
+    event_filter_enabled: bool = True
+    # Z-score method: "gaussian" = (x-mean)/std; "empirical" = norm.ppf(rank) — fat-tail robust.
+    zscore_method: str = "gaussian"
+    # Momentum look-back in calendar days (MomentumSignalGenerator only).
+    momentum_window: int = 5
+
+
+@dataclass
+class BacktestSpec:
+    stock_fee_bps: float = 1.0
+    option_fee_per_contract: float = 0.65
+    sizing_mode: str = "contracts"  # contracts | dollar_vega
+    max_contracts_per_signal: float = 10.0
+    target_dollar_vega_per_signal: float = 20000.0
+    roll_threshold_days: int = 5
+
+
+@dataclass
+class MasterRunSpec:
+    data: DataSpec
+    model: VolatilityModelSpec = field(default_factory=VolatilityModelSpec)
+    skew: SkewSpec = field(default_factory=SkewSpec)
+    signal: SignalSpec = field(default_factory=SignalSpec)
+    backtest: BacktestSpec = field(default_factory=BacktestSpec)
 
 
 class Pipeline:
-    def __init__(self, config: PipelineConfig):
+    def __init__(self, config: MasterRunSpec):
         self.config = config
         self.db_path = f"{DATA_LOCATION}/market_data.duckdb"
         self._pipeline = self._build_pipeline()
         self._spec = RunSpec(
-            tickers=self.config.tickers,
-            start_date=self.config.start_date,
-            end_date=self.config.end_date,
+            tickers=self.config.data.tickers,
+            start_date=self.config.data.start_date,
+            end_date=self.config.data.end_date,
         )
         self._stage_save_root = Path(__file__).resolve().parent / "stage_saves"
         self._stage_save_root.mkdir(parents=True, exist_ok=True)
 
     def _cache_id(self) -> str:
         payload = {
-            "tickers": self.config.tickers,
-            "start_date": self.config.start_date,
-            "end_date": self.config.end_date,
-            "model_kind": self.config.model_kind,
-            "db_table": self.config.db_table,
-            "ssvi_calibration_backend": self.config.ssvi_calibration_backend,
-            "ssvi_random_seed": self.config.ssvi_random_seed,
-            "ssvi_n_param_steps": self.config.ssvi_n_param_steps,
-            "ssvi_n_theta_steps": self.config.ssvi_n_theta_steps,
-            "ssvi_n_restarts": self.config.ssvi_n_restarts,
-            "ssvi_theta_smoothness_lambda": self.config.ssvi_theta_smoothness_lambda,
+            **asdict(self.config),
             "target_days": self._spec.target_days,
             "k0": self._spec.k0,
-            "signal_regression_window": self.config.signal_regression_window,
-            "signal_min_regression_obs": self.config.signal_min_regression_obs,
-            "signal_zscore_window": self.config.signal_zscore_window,
-            "signal_entry_z": self.config.signal_entry_z,
-            "signal_exit_z": self.config.signal_exit_z,
-            "signal_min_hold_days": self.config.signal_min_hold_days,
-            "signal_max_abs_position": self.config.signal_max_abs_position,
-            "signal_min_liquidity_points": self.config.signal_min_liquidity_points,
-            "signal_max_fit_rmse_iv": self.config.signal_max_fit_rmse_iv,
-            "signal_edge_horizon_days": self.config.signal_edge_horizon_days,
-            "signal_edge_cost_buffer": self.config.signal_edge_cost_buffer,
-            "signal_half_spread_cost": self.config.signal_half_spread_cost,
-            "signal_commission_cost": self.config.signal_commission_cost,
-            "signal_direction": self.config.signal_direction,
-            "signal_model_kind": self.config.signal_model_kind,
-            "signal_cross_section_top_k": self.config.signal_cross_section_top_k,
-            "signal_cross_section_bottom_k": self.config.signal_cross_section_bottom_k,
-            "signal_max_name_weight": self.config.signal_max_name_weight,
-            "signal_max_gross_leverage": self.config.signal_max_gross_leverage,
-            "signal_vol_target_daily": self.config.signal_vol_target_daily,
-            "signal_auto_sign_window": self.config.signal_auto_sign_window,
-            "signal_winsor_quantile": self.config.signal_winsor_quantile,
-            "signal_use_mad_zscore": self.config.signal_use_mad_zscore,
-            "signal_regime_sector_vol_window": self.config.signal_regime_sector_vol_window,
-            "signal_regime_sector_abs_z_max": self.config.signal_regime_sector_abs_z_max,
-            "signal_regime_sector_vol_z_max": self.config.signal_regime_sector_vol_z_max,
-            "signal_factor_model": self.config.signal_factor_model,
-            "signal_n_pca_factors": self.config.signal_n_pca_factors,
-            "signal_benchmark_preference": self.config.signal_benchmark_preference,
         }
         return hashlib.md5(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:12]
 
@@ -201,78 +216,114 @@ class Pipeline:
 
     def _build_pipeline(self) -> StrategyPipeline:
         surface_kwargs = {
-            "calibration_backend": self.config.ssvi_calibration_backend,
-            "random_seed": self.config.ssvi_random_seed,
-            "n_param_steps": self.config.ssvi_n_param_steps,
-            "n_theta_steps": self.config.ssvi_n_theta_steps,
-            "n_restarts": self.config.ssvi_n_restarts,
-            "theta_smoothness_lambda": self.config.ssvi_theta_smoothness_lambda,
+            "n_theta_steps": self.config.model.ssvi_n_theta_steps,
+            "n_restarts": self.config.model.ssvi_n_restarts,
         }
+        # rr_k is the single source of truth: the skew calculator and backtest
+        # both use the same wing width so signal and execution are aligned.
         skew_kwargs = {
-            "technique": self.config.skew_technique,
-            "delta_k": self.config.skew_delta_k,
-            "rr_k": self.config.skew_rr_k,
+            "technique": self.config.skew.technique,
+            "delta_k": self.config.skew.delta_k,
+            "rr_k": self.config.skew.rr_k,
+            "rr_delta": self.config.skew.rr_delta,
+            "tenor_days": self.config.skew.tenor_days,
         }
         signal_kwargs = {
-            "regression_window": self.config.signal_regression_window,
-            "min_regression_obs": self.config.signal_min_regression_obs,
-            "zscore_window": self.config.signal_zscore_window,
-            "entry_z": self.config.signal_entry_z,
-            "exit_z": self.config.signal_exit_z,
-            "min_hold_days": self.config.signal_min_hold_days,
-            "max_abs_position": self.config.signal_max_abs_position,
-            "min_liquidity_points": self.config.signal_min_liquidity_points,
-            "max_fit_rmse_iv": self.config.signal_max_fit_rmse_iv,
-            "edge_horizon_days": self.config.signal_edge_horizon_days,
-            "edge_cost_buffer": self.config.signal_edge_cost_buffer,
-            "half_spread_cost": self.config.signal_half_spread_cost,
-            "commission_cost": self.config.signal_commission_cost,
-            "signal_direction": self.config.signal_direction,
-            "cross_section_top_k": self.config.signal_cross_section_top_k,
-            "cross_section_bottom_k": self.config.signal_cross_section_bottom_k,
-            "max_name_weight": self.config.signal_max_name_weight,
-            "max_gross_leverage": self.config.signal_max_gross_leverage,
-            "vol_target_daily": self.config.signal_vol_target_daily,
-            "auto_sign_window": self.config.signal_auto_sign_window,
-            "winsor_quantile": self.config.signal_winsor_quantile,
-            "use_mad_zscore": self.config.signal_use_mad_zscore,
-            "regime_sector_vol_window": self.config.signal_regime_sector_vol_window,
-            "regime_sector_abs_z_max": self.config.signal_regime_sector_abs_z_max,
-            "regime_sector_vol_z_max": self.config.signal_regime_sector_vol_z_max,
-            "factor_model": self.config.signal_factor_model,
-            "n_pca_factors": self.config.signal_n_pca_factors,
-            "benchmark_preference": self.config.signal_benchmark_preference,
+            "regression_window": self.config.signal.regression_window,
+            "min_regression_obs": self.config.signal.min_regression_obs,
+            "zscore_window": self.config.signal.zscore_window,
+            "entry_z": self.config.signal.entry_z,
+            "exit_z": self.config.signal.exit_z,
+            "min_hold_days": self.config.signal.min_hold_days,
+            "min_liquidity_points": self.config.signal.min_liquidity_points,
+            "max_fit_rmse_iv": self.config.signal.max_fit_rmse_iv,
+            "signal_direction": self.config.signal.direction,
+            "cross_section_top_k": self.config.signal.cross_section_top_k,
+            "cross_section_bottom_k": self.config.signal.cross_section_bottom_k,
+            "max_gross_leverage": self.config.signal.max_gross_leverage,
+            "benchmark_preference": self.config.signal.benchmark_preference,
+            "trade_tenor_days": self.config.signal.trade_tenor_days,
+            "ts_event_threshold": self.config.signal.ts_event_threshold,
+            "event_filter_enabled": self.config.signal.event_filter_enabled,
+            "zscore_method": self.config.signal.zscore_method,
+            "momentum_window": self.config.signal.momentum_window,
         }
         backtest_kwargs = {
-            "stock_fee_bps": self.config.backtest_stock_fee_bps,
-            "option_fee_per_contract": self.config.backtest_option_fee_per_contract,
-            "sizing_mode": self.config.backtest_sizing_mode,
-            "max_contracts_per_signal": self.config.backtest_max_contracts_per_signal,
-            "target_dollar_vega_per_signal": self.config.backtest_target_dollar_vega_per_signal,
-            "roll_threshold_days": self.config.backtest_roll_threshold_days,
-            "rr_put_log_moneyness": self.config.backtest_rr_put_log_moneyness,
-            "rr_call_log_moneyness": self.config.backtest_rr_call_log_moneyness,
+            "stock_fee_bps": self.config.backtest.stock_fee_bps,
+            "option_fee_per_contract": self.config.backtest.option_fee_per_contract,
+            "sizing_mode": self.config.backtest.sizing_mode,
+            "max_contracts_per_signal": self.config.backtest.max_contracts_per_signal,
+            "target_dollar_vega_per_signal": self.config.backtest.target_dollar_vega_per_signal,
+            "roll_threshold_days": self.config.backtest.roll_threshold_days,
+            # trade_tenor_days drives contract selection in the backtest engine.
+            "target_days": self.config.signal.trade_tenor_days,
+            # Delta targeting takes precedence; rr_k is the log-moneyness fallback.
+            "rr_put_delta": self.config.skew.rr_delta,
+            "rr_call_delta": self.config.skew.rr_delta,
+            "rr_put_log_moneyness": -self.config.skew.rr_k,
+            "rr_call_log_moneyness": +self.config.skew.rr_k,
         }
-        if self.config.model_kind == "surface":
+        processor_kwargs = {
+            "iv_upper_percentile": self.config.data.iv_upper_percentile,
+        }
+        if self.config.model.model_kind == "surface":
             return build_default_surface_pipeline(
                 db_path=self.db_path,
-                table=self.config.db_table,
+                table=self.config.data.db_table,
+                processor_kwargs=processor_kwargs,
                 surface_kwargs=surface_kwargs,
                 skew_kwargs=skew_kwargs,
                 signal_kwargs=signal_kwargs,
                 backtest_kwargs=backtest_kwargs,
-                signal_kind=self.config.signal_model_kind,
+                signal_kind=self.config.signal.model_kind,
             )
-        if self.config.model_kind == "smile":
+        if self.config.model.model_kind == "smile":
             return build_default_smile_pipeline(
                 db_path=self.db_path,
-                table=self.config.db_table,
+                table=self.config.data.db_table,
+                processor_kwargs=processor_kwargs,
                 skew_kwargs=skew_kwargs,
                 signal_kwargs=signal_kwargs,
                 backtest_kwargs=backtest_kwargs,
-                signal_kind=self.config.signal_model_kind,
+                signal_kind=self.config.signal.model_kind,
             )
-        raise ValueError("model_kind must be one of: surface, smile")
+        raise ValueError("model.model_kind must be one of: surface, smile")
+
+    @staticmethod
+    def _apply_overrides(config: MasterRunSpec, overrides: Dict[str, object]) -> MasterRunSpec:
+        """Apply dot-notation overrides (e.g. 'signal.entry_z') to a MasterRunSpec."""
+        data_updates: Dict[str, object] = {}
+        model_updates: Dict[str, object] = {}
+        skew_updates: Dict[str, object] = {}
+        signal_updates: Dict[str, object] = {}
+        backtest_updates: Dict[str, object] = {}
+        section_map = {
+            "data": data_updates,
+            "model": model_updates,
+            "skew": skew_updates,
+            "signal": signal_updates,
+            "backtest": backtest_updates,
+        }
+        for key, val in overrides.items():
+            if "." not in key:
+                raise ValueError(
+                    f"Walk-forward override key '{key}' must use dot notation "
+                    "(e.g. 'signal.entry_z', 'model.rr_k')."
+                )
+            section, field_name = key.split(".", 1)
+            if section not in section_map:
+                raise ValueError(
+                    f"Unknown config section '{section}' in override key '{key}'. "
+                    "Valid sections: data, model, signal, backtest."
+                )
+            section_map[section][field_name] = val
+        return MasterRunSpec(
+            data=replace(config.data, **data_updates) if data_updates else config.data,
+            model=replace(config.model, **model_updates) if model_updates else config.model,
+            skew=replace(config.skew, **skew_updates) if skew_updates else config.skew,
+            signal=replace(config.signal, **signal_updates) if signal_updates else config.signal,
+            backtest=replace(config.backtest, **backtest_updates) if backtest_updates else config.backtest,
+        )
 
     @staticmethod
     def _slice_df_by_dates(df: pd.DataFrame, dates: List[pd.Timestamp]) -> pd.DataFrame:
@@ -361,69 +412,34 @@ class Pipeline:
         }
 
     def _default_walk_forward_candidates(self) -> List[Dict[str, object]]:
-        base = {
-            "signal_direction": "auto",
-            "signal_min_liquidity_points": 150.0,
-            "signal_max_fit_rmse_iv": 0.60,
-            "signal_cross_section_top_k": 2,
-            "signal_cross_section_bottom_k": 2,
-            "signal_max_name_weight": 0.35,
-            "signal_max_gross_leverage": 1.5,
-            "signal_vol_target_daily": 0.02,
-        }
         candidates: List[Dict[str, object]] = []
-        for factor_model in ["pca", "sector"]:
-            for entry_z, exit_z in [(1.00, 0.25), (1.25, 0.30)]:
-                for rr_width in [0.10, 0.15]:
-                    cand = dict(base)
-                    cand.update(
-                        {
-                            "signal_factor_model": factor_model,
-                            "signal_n_pca_factors": 2,
-                            "signal_entry_z": entry_z,
-                            "signal_exit_z": exit_z,
-                            "backtest_rr_put_log_moneyness": -rr_width,
-                            "backtest_rr_call_log_moneyness": rr_width,
-                        }
-                    )
-                    candidates.append(cand)
-        for factor_model in ["pca", "sector"]:
-            cand = dict(base)
-            cand.update(
-                {
-                    "signal_factor_model": factor_model,
-                    "signal_n_pca_factors": 2,
-                    "signal_entry_z": 1.25,
-                    "signal_exit_z": 0.30,
-                    "signal_max_name_weight": 0.30,
-                    "signal_max_gross_leverage": 1.25,
-                    "signal_vol_target_daily": 0.015,
-                    "backtest_rr_put_log_moneyness": -0.15,
-                    "backtest_rr_call_log_moneyness": 0.15,
-                }
-            )
-            candidates.append(cand)
+        for entry_z, exit_z in [(1.00, 0.25), (1.25, 0.30), (1.50, 0.50)]:
+            for rr_k in [0.10, 0.15]:
+                for leverage in [1.0, 1.5]:
+                    candidates.append({
+                        "signal.entry_z": entry_z,
+                        "signal.exit_z": exit_z,
+                        "signal.max_gross_leverage": leverage,
+                        "model.rr_k": rr_k,
+                    })
         return candidates
 
     def run(self):
         return self._pipeline.run(self._spec)
 
-    def run_load(self, save: bool = False, saved: str | None = None, force_recompute: bool = False) -> LoadedData:
+    def run_load(self, saved: str | None = None, force_recompute: bool = False) -> LoadedData:
         path = self._resolve_save_path("load", saved) if saved is not None else None
         if path is not None and path.exists() and not force_recompute:
             raw_by_ticker, _ = self._load_dict_frames(path)
             return LoadedData(raw_by_ticker=raw_by_ticker)
         out = self._pipeline.run_load(self._spec)
-        if save:
-            if path is None:
-                raise ValueError("Explicit cache path required: pass `saved='filename.parquet'` when save=True.")
+        if saved is not None:
             self._save_dict_frames(path, out.raw_by_ticker)
         return out
 
     def run_process(
         self,
         loaded: LoadedData | None = None,
-        save: bool = False,
         saved: str | None = None,
         force_recompute: bool = False,
     ) -> ProcessedData:
@@ -434,16 +450,13 @@ class Pipeline:
         if loaded is None:
             raise ValueError("run_process requires `loaded` unless `saved` points to an existing parquet.")
         out = self._pipeline.run_process(loaded, self._spec)
-        if save:
-            if path is None:
-                raise ValueError("Explicit cache path required: pass `saved='filename.parquet'` when save=True.")
+        if saved is not None:
             self._save_dict_frames(path, out.panel_by_ticker)
         return out
 
     def run_model(
         self,
         processed: ProcessedData | None = None,
-        save: bool = False,
         saved: str | None = None,
         force_recompute: bool = False,
     ) -> ModelOutput:
@@ -453,23 +466,20 @@ class Pipeline:
             if "representation" not in meta:
                 raise ValueError(
                     "Saved model artifact is missing required metadata field 'representation'. "
-                    "Re-run run_model(..., save=True) with the current code."
+                    "Re-run run_model(..., saved='filename.parquet') with the current code."
                 )
             representation = str(meta["representation"])
             return ModelOutput(model_by_ticker=model_by_ticker, representation=representation)
         if processed is None:
             raise ValueError("run_model requires `processed` unless `saved` points to an existing parquet.")
         out = self._pipeline.run_model(processed, self._spec)
-        if save:
-            if path is None:
-                raise ValueError("Explicit cache path required: pass `saved='filename.parquet'` when save=True.")
+        if saved is not None:
             self._save_dict_frames(path, out.model_by_ticker, extra_meta={"representation": out.representation})
         return out
 
     def run_skew(
         self,
         modeled: ModelOutput | None = None,
-        save: bool = False,
         saved: str | None = None,
         force_recompute: bool = False,
     ) -> SkewOutput:
@@ -480,16 +490,13 @@ class Pipeline:
         if modeled is None:
             raise ValueError("run_skew requires `modeled` unless `saved` points to an existing parquet.")
         out = self._pipeline.run_skew(modeled, self._spec)
-        if save:
-            if path is None:
-                raise ValueError("Explicit cache path required: pass `saved='filename.parquet'` when save=True.")
+        if saved is not None:
             self._save_dict_frames(path, out.skew_by_ticker)
         return out
 
     def run_signals(
         self,
         skew: SkewOutput | None = None,
-        save: bool = False,
         saved: str | None = None,
         force_recompute: bool = False,
     ) -> SignalOutput:
@@ -500,9 +507,7 @@ class Pipeline:
         if skew is None:
             raise ValueError("run_signals requires `skew` unless `saved` points to an existing parquet.")
         out = self._pipeline.run_signals(skew, self._spec)
-        if save:
-            if path is None:
-                raise ValueError("Explicit cache path required: pass `saved='filename.parquet'` when save=True.")
+        if saved is not None:
             self._save_dict_frames(path, out.signal_map)
         return out
 
@@ -523,7 +528,7 @@ class Pipeline:
                 raise ValueError("run_walk_forward requires `skew` or `saved` pointing to an existing skew parquet.")
             skew = self.run_skew(saved=saved)
 
-        benchmark = self.config.signal_benchmark_preference
+        benchmark = self.config.signal.benchmark_preference
         benchmark_df = skew.skew_by_ticker.get(benchmark)
         if benchmark_df is not None and not benchmark_df.empty:
             all_dates = sorted(pd.to_datetime(benchmark_df["date"]).drop_duplicates().tolist())
@@ -541,14 +546,22 @@ class Pipeline:
             raise ValueError("No walk-forward windows available for the supplied date range and train/test settings.")
 
         candidates = candidate_overrides or self._default_walk_forward_candidates()
-        config_fields = set(asdict(self.config).keys())
         for i, overrides in enumerate(candidates, start=1):
-            invalid = set(overrides.keys()) - config_fields
-            if invalid:
-                raise ValueError(f"Invalid walk-forward candidate override keys for candidate {i}: {sorted(invalid)}")
+            for key in overrides:
+                if "." not in key:
+                    raise ValueError(
+                        f"Walk-forward candidate {i}: override key '{key}' must use dot notation "
+                        "(e.g. 'signal.entry_z', 'model.rr_k')."
+                    )
+                section = key.split(".", 1)[0]
+                if section not in {"data", "model", "signal", "backtest"}:
+                    raise ValueError(
+                        f"Walk-forward candidate {i}: unknown section '{section}' in key '{key}'."
+                    )
+
         min_train_required = max(
-            int(overrides.get("signal_regression_window", self.config.signal_regression_window))
-            + int(overrides.get("signal_zscore_window", self.config.signal_zscore_window))
+            int(overrides.get("signal.regression_window", self.config.signal.regression_window))
+            + int(overrides.get("signal.zscore_window", self.config.signal.zscore_window))
             for overrides in candidates
         )
         if train_days < min_train_required:
@@ -572,11 +585,16 @@ class Pipeline:
             best_test_stats: Dict[str, float] | None = None
 
             for candidate_id, overrides in enumerate(candidates, start=1):
-                cfg = replace(
-                    self.config,
-                    start_date=str(pd.Timestamp(combo_dates[0]).date()),
-                    end_date=str(pd.Timestamp(combo_dates[-1]).date()),
-                    **overrides,
+                cfg = self._apply_overrides(
+                    replace(
+                        self.config,
+                        data=replace(
+                            self.config.data,
+                            start_date=str(pd.Timestamp(combo_dates[0]).date()),
+                            end_date=str(pd.Timestamp(combo_dates[-1]).date()),
+                        ),
+                    ),
+                    overrides,
                 )
                 pipe = Pipeline(cfg)
                 signals = pipe.run_signals(skew_window)
@@ -585,13 +603,13 @@ class Pipeline:
                 test_portfolio = self._slice_df_by_dates(backtest.portfolio, test_dates)
                 train_stats = self._score_portfolio(
                     train_portfolio,
-                    regression_window=cfg.signal_regression_window,
-                    zscore_window=cfg.signal_zscore_window,
+                    regression_window=cfg.signal.regression_window,
+                    zscore_window=cfg.signal.zscore_window,
                 )
                 test_stats = self._score_portfolio(
                     test_portfolio,
-                    regression_window=cfg.signal_regression_window,
-                    zscore_window=cfg.signal_zscore_window,
+                    regression_window=cfg.signal.regression_window,
+                    zscore_window=cfg.signal.zscore_window,
                 )
                 candidate_rows.append(
                     {
@@ -661,10 +679,7 @@ class Pipeline:
             .drop_duplicates(subset=["date"], keep="first")
             .reset_index(drop=True)
         )
-        if "portfolio_cum_net_pnl" not in oos_portfolio.columns:
-            oos_portfolio["portfolio_cum_net_pnl"] = oos_portfolio["portfolio_net_pnl"].cumsum()
-        else:
-            oos_portfolio["portfolio_cum_net_pnl"] = oos_portfolio["portfolio_net_pnl"].cumsum()
+        oos_portfolio["portfolio_cum_net_pnl"] = oos_portfolio["portfolio_net_pnl"].cumsum()
 
         oos_by_ticker = {
             ticker: (
@@ -677,8 +692,8 @@ class Pipeline:
         }
         summary = self._score_portfolio(
             oos_portfolio,
-            regression_window=self.config.signal_regression_window,
-            zscore_window=self.config.signal_zscore_window,
+            regression_window=self.config.signal.regression_window,
+            zscore_window=self.config.signal.zscore_window,
         )
         return WalkForwardOutput(
             portfolio=oos_portfolio,
@@ -690,22 +705,21 @@ class Pipeline:
 
 
 if __name__ == "__main__":
-    cfg = PipelineConfig(
-        tickers=["XLF", "GS", "JPM", "BAC", "BRK", "C", "TLQD"],
-        start_date="2008-01-01",
-        end_date="2008-12-31",
-        model_kind="surface",  # swap to "smile" to test 2D module
+    cfg = MasterRunSpec(
+        data=DataSpec(
+            tickers=["XLF", "GS", "JPM", "BAC", "BRK", "C"],
+            start_date="2008-01-01",
+            end_date="2008-04-30",
+        ),
     )
-    
-    #output = Pipeline(cfg).run()
-    loaded = Pipeline(cfg).run_load()
-    processed = Pipeline(cfg).run_process(loaded)
-    modeled = Pipeline(cfg).run_model(processed)
-    print(modeled.model_by_ticker["XLF"].head())
-    #skew = Pipeline(cfg).run_skew(modeled)
-    #signals = Pipeline(cfg).run_signals(skew)
-    #backtest = Pipeline(cfg).run_backtest(signals, skew)
-    
-    #print(backtest.raw_by_ticker["XLF"].head())
-    
-    #print(output.backtest.summary)
+
+    p = Pipeline(cfg)
+    loaded = p.run_load()
+    processed = p.run_process(loaded)
+    modeled = p.run_model(processed)
+    skew = p.run_skew(modeled)
+    signals = p.run_signals(skew)
+    backtest = p.run_backtest(signals, skew)
+
+    print(backtest.portfolio.tail())
+    print(backtest.summary)

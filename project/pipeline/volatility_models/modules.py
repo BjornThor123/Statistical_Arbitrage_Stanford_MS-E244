@@ -14,16 +14,52 @@ from volatility_models.model import CalibratedSSVISurface, calibrate_ssvi_surfac
 
 @dataclass
 class SSVISurfaceModeler(VolatilityModelModule):
-    calibration_backend: str = "auto"
-    random_seed: int = 42
-    n_param_steps: int = 300
+    """Fits an SSVI surface to each day's option cross-section for each ticker."""
+
     n_theta_steps: int = 3
     n_restarts: int = 4
-    theta_smoothness_lambda: float = 2e-3
-    min_points_per_day: int = 120
-    min_maturities_per_day: int = 3
     raise_on_all_calibration_failures: bool = True
     show_progress: bool = True
+
+    def _make_model_row(self, surf: CalibratedSSVISurface, spec: RunSpec, day: pd.DataFrame, date: object) -> Dict[str, object]:
+        """Build the output row dict for a single calibrated surface."""
+        k = day["k"].to_numpy(dtype=np.float64)
+        t = day["t"].to_numpy(dtype=np.float64)
+        sigma = day["sigma"].to_numpy(dtype=np.float64)
+        skew = surf.sigma_skew(t=spec.target_t, k0=spec.k0)
+        theta_target = float(surf.theta_at(np.asarray([spec.target_t]))[0])
+        atm_iv = float(np.sqrt(max(theta_target, 1e-12) / max(spec.target_t, 1e-12)))
+        day_fwd = day[["t", "F"]].drop_duplicates(subset=["t"])
+        closest_idx = (day_fwd["t"] - spec.target_t).abs().idxmin()
+        forward_price = float(day_fwd.loc[closest_idx, "F"])
+        return {
+            "date": pd.Timestamp(date),
+            "ticker": str(day["ticker"].iloc[0]),
+            "skew": float(skew),
+            "target_t": float(spec.target_t),
+            "k0": float(spec.k0),
+            "rho": float(surf.params.rho),
+            "eta": float(surf.params.eta),
+            "gamma": float(surf.params.gamma),
+            "theta_target": theta_target,
+            "atm_iv": atm_iv,
+            "forward_price": forward_price,
+            "n_points": int(surf.diagnostics.n_points),
+            "rmse_implied_volatility": float(surf.diagnostics.rmse_implied_volatility),
+            "model_family": "ssvi_surface",
+            "model_state": json.dumps(
+                {
+                    "rho": float(surf.params.rho),
+                    "eta": float(surf.params.eta),
+                    "gamma": float(surf.params.gamma),
+                    "t_nodes": surf.t_nodes.tolist(),
+                    "theta_nodes": surf.theta_nodes.tolist(),
+                }
+            ),
+            "obs_k": k.tolist(),
+            "obs_t": t.tolist(),
+            "obs_sigma": sigma.tolist(),
+        }
 
     def _fit_one(self, panel: pd.DataFrame, spec: RunSpec) -> pd.DataFrame:
         rows: List[Dict[str, object]] = []
@@ -34,11 +70,6 @@ class SSVISurfaceModeler(VolatilityModelModule):
         day_groups = list(panel.groupby("date"))
         day_iter = tqdm(day_groups, desc="SSVI days", leave=False) if self.show_progress else day_groups
         for d, day in day_iter:
-            # if len(day) < self.min_points_per_day:
-            #     continue
-            # if day["t"].round(8).nunique() < self.min_maturities_per_day:
-            #     continue
-
             k = day["k"].to_numpy(dtype=np.float64)
             t = day["t"].to_numpy(dtype=np.float64)
             sigma = day["sigma"].to_numpy(dtype=np.float64)
@@ -48,14 +79,10 @@ class SSVISurfaceModeler(VolatilityModelModule):
                     k=k,
                     t=t,
                     sigma=sigma,
-                    random_seed=self.random_seed,
-                    n_param_steps=self.n_param_steps,
                     n_theta_steps=self.n_theta_steps,
                     n_restarts=self.n_restarts,
                     initial_params=prev_params,
                     initial_theta_nodes=prev_theta,
-                    theta_smoothness_lambda=self.theta_smoothness_lambda,
-                    calibration_backend=self.calibration_backend,
                 )
             except Exception as exc:
                 n_calib_fail += 1
@@ -65,54 +92,17 @@ class SSVISurfaceModeler(VolatilityModelModule):
                 print(
                     "SSVI calibration error | "
                     f"ticker={ticker_name} date={pd.Timestamp(d).date()} "
-                    f"backend={self.calibration_backend} "
                     f"error={type(exc).__name__}: {exc}"
                 )
                 continue
 
             prev_params = (surf.params.rho, surf.params.eta, surf.params.gamma)
             prev_theta = surf.theta_nodes.copy()
-            skew = surf.sigma_skew(t=spec.target_t, k0=spec.k0)
-            theta_target = float(surf.theta_at(np.asarray([spec.target_t]))[0])
-            atm_iv = float(np.sqrt(max(theta_target, 1e-12) / max(spec.target_t, 1e-12)))
-            day_fwd = day[["t", "F"]].drop_duplicates(subset=["t"])
-            closest_idx = (day_fwd["t"] - spec.target_t).abs().idxmin()
-            forward_price = float(day_fwd.loc[closest_idx, "F"])
-            rows.append(
-                {
-                    "date": pd.Timestamp(d),
-                    "ticker": str(day["ticker"].iloc[0]),
-                    "skew": float(skew),
-                    "target_t": float(spec.target_t),
-                    "k0": float(spec.k0),
-                    "rho": float(surf.params.rho),
-                    "eta": float(surf.params.eta),
-                    "gamma": float(surf.params.gamma),
-                    "theta_target": theta_target,
-                    "atm_iv": atm_iv,
-                    "forward_price": forward_price,
-                    "n_points": int(surf.diagnostics.n_points),
-                    "rmse_implied_volatility": float(surf.diagnostics.rmse_implied_volatility),
-                    "model_family": "ssvi_surface",
-                    "model_state": json.dumps(
-                        {
-                            "rho": float(surf.params.rho),
-                            "eta": float(surf.params.eta),
-                            "gamma": float(surf.params.gamma),
-                            "t_nodes": surf.t_nodes.tolist(),
-                            "theta_nodes": surf.theta_nodes.tolist(),
-                        }
-                    ),
-                    "obs_k": k.tolist(),
-                    "obs_t": t.tolist(),
-                    "obs_sigma": sigma.tolist(),
-                }
-            )
+            rows.append(self._make_model_row(surf, spec, day, d))
         if not rows:
             if self.raise_on_all_calibration_failures and n_calib_fail > 0 and first_calib_error is not None:
                 raise RuntimeError(
                     "All SSVI calibrations failed for this ticker. "
-                    f"backend={self.calibration_backend}. "
                     f"first_error={type(first_calib_error).__name__}: {first_calib_error}"
                 ) from first_calib_error
             return pd.DataFrame(columns=["date", "ticker", "skew"])
@@ -127,6 +117,8 @@ class SSVISurfaceModeler(VolatilityModelModule):
 
 @dataclass
 class LinearSmileModeler(VolatilityModelModule):
+    """Fits a linear IV smile (IV = intercept + slope * k) near target maturity."""
+
     t_band: float = 10.0 / 365.0
     min_points_per_day: int = 60
     show_progress: bool = True
@@ -137,8 +129,6 @@ class LinearSmileModeler(VolatilityModelModule):
         day_iter = tqdm(day_groups, desc="Smile days", leave=False) if self.show_progress else day_groups
         for d, day in day_iter:
             sub = day[np.abs(day["t"] - spec.target_t) <= self.t_band].copy()
-            # if len(sub) < self.min_points_per_day:
-            #     continue
             k = sub["k"].to_numpy(dtype=np.float64)
             sigma = sub["sigma"].to_numpy(dtype=np.float64)
             if np.unique(k).shape[0] < 5:

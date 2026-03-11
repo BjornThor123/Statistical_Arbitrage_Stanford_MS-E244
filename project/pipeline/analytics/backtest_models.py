@@ -1,3 +1,10 @@
+"""
+Backtest analytics.
+
+plot_backtest_analytics(backtest)  — full dashboard: PnL, drawdown, greeks, attribution.
+summarize_backtest(backtest)       — single-row summary table (Sharpe, MDD, hit rate).
+pnl_attribution(backtest)         — PnL breakdown by ticker.
+"""
 from __future__ import annotations
 
 from typing import Literal
@@ -110,41 +117,41 @@ def pnl_attribution(backtest: BacktestOutput) -> pd.DataFrame:
     return out
 
 
-def plot_backtest_analytics(backtest: BacktestOutput, engine: Literal["plotly", "matplotlib"] = "plotly") -> pd.DataFrame:
+def _prepare_backtest_data(backtest: BacktestOutput) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Prepare portfolio and ticker DataFrames with derived columns for plotting."""
     p = backtest.portfolio.copy()
-    if p.empty:
-        raise ValueError("Backtest portfolio is empty.")
     p["date"] = pd.to_datetime(p["date"])
     p = p.sort_values("date").reset_index(drop=True)
     if "portfolio_cum_net_pnl" not in p.columns:
         p["portfolio_cum_net_pnl"] = p["portfolio_net_pnl"].cumsum()
     p["drawdown"] = p["portfolio_cum_net_pnl"] - p["portfolio_cum_net_pnl"].cummax()
-    if "portfolio_option_pnl" in p.columns:
-        p["cum_option_pnl"] = p["portfolio_option_pnl"].cumsum()
-    else:
-        p["cum_option_pnl"] = np.nan
-    if "portfolio_hedge_pnl" in p.columns:
-        p["cum_hedge_pnl"] = p["portfolio_hedge_pnl"].cumsum()
-    else:
-        p["cum_hedge_pnl"] = np.nan
+    p["cum_option_pnl"] = p["portfolio_option_pnl"].cumsum() if "portfolio_option_pnl" in p.columns else np.nan
+    p["cum_hedge_pnl"] = p["portfolio_hedge_pnl"].cumsum() if "portfolio_hedge_pnl" in p.columns else np.nan
     p["cum_cost"] = p["portfolio_cost"].cumsum() if "portfolio_cost" in p.columns else np.nan
     p["rolling_sharpe_63d"] = (
         p["portfolio_net_pnl"].rolling(63).mean()
         / p["portfolio_net_pnl"].rolling(63).std().replace(0.0, np.nan)
         * np.sqrt(252.0)
     )
-
     t = _stack_ticker_frames(backtest)
+    for col in ["residual", "turnover", "n_contracts", "hedge_shares"]:
+        if col not in t.columns:
+            t[col] = np.nan
+    return p, t
+
+
+def _add_trace_if_present(fig, df: pd.DataFrame, col: str, name: str, row: int, col_num: int, **kwargs) -> None:
+    """Add a plotly line trace only if the column exists in df."""
+    if col in df.columns:
+        fig.add_trace(go.Scatter(x=df["date"], y=df[col], mode="lines", name=name, **kwargs), row=row, col=col_num)
+
+
+def plot_backtest_analytics(backtest: BacktestOutput, engine: Literal["plotly", "matplotlib"] = "plotly") -> pd.DataFrame:
+    if backtest.portfolio.empty:
+        raise ValueError("Backtest portfolio is empty.")
+    p, t = _prepare_backtest_data(backtest)
     if t.empty:
         raise ValueError("Backtest by_ticker is empty.")
-    if "residual" not in t.columns:
-        t["residual"] = np.nan
-    if "turnover" not in t.columns:
-        t["turnover"] = np.nan
-    if "n_contracts" not in t.columns:
-        t["n_contracts"] = np.nan
-    if "hedge_shares" not in t.columns:
-        t["hedge_shares"] = np.nan
 
     residual_summary = (
         t.groupby("ticker", as_index=False)
@@ -213,29 +220,20 @@ def plot_backtest_analytics(backtest: BacktestOutput, engine: Literal["plotly", 
             ),
         )
         fig.add_trace(go.Scatter(x=p["date"], y=p["portfolio_cum_net_pnl"], mode="lines", name="Cum Net"), row=1, col=1)
-        if "cum_option_pnl" in p.columns:
-            fig.add_trace(go.Scatter(x=p["date"], y=p["cum_option_pnl"], mode="lines", name="Cum Option"), row=1, col=1)
-        if "cum_hedge_pnl" in p.columns:
-            fig.add_trace(go.Scatter(x=p["date"], y=p["cum_hedge_pnl"], mode="lines", name="Cum Hedge"), row=1, col=1)
+        _add_trace_if_present(fig, p, "cum_option_pnl", "Cum Option", row=1, col_num=1)
+        _add_trace_if_present(fig, p, "cum_hedge_pnl", "Cum Hedge", row=1, col_num=1)
         if "cum_cost" in p.columns:
             fig.add_trace(go.Scatter(x=p["date"], y=-p["cum_cost"], mode="lines", name="-Cum Cost"), row=1, col=1)
         fig.add_trace(go.Scatter(x=p["date"], y=p["drawdown"], mode="lines", name="Drawdown", fill="tozeroy"), row=1, col=2)
         fig.add_trace(go.Scatter(x=p["date"], y=p["portfolio_net_pnl"], mode="lines", name="Net"), row=2, col=1)
         fig.add_trace(go.Scatter(x=p["date"], y=p["portfolio_gross_pnl"], mode="lines", name="Gross"), row=2, col=1)
-        if "portfolio_option_pnl" in p.columns:
-            fig.add_trace(go.Scatter(x=p["date"], y=p["portfolio_option_pnl"], mode="lines", name="Option"), row=2, col=1)
-        if "portfolio_hedge_pnl" in p.columns:
-            fig.add_trace(go.Scatter(x=p["date"], y=p["portfolio_hedge_pnl"], mode="lines", name="Hedge"), row=2, col=1)
-        if "portfolio_skew_vega_pnl" in p.columns:
-            fig.add_trace(go.Scatter(x=p["date"], y=p["portfolio_skew_vega_pnl"], mode="lines", name="Skew Vega"), row=2, col=1)
-        if "portfolio_level_vega_pnl" in p.columns:
-            fig.add_trace(go.Scatter(x=p["date"], y=p["portfolio_level_vega_pnl"], mode="lines", name="Level Vega"), row=2, col=1)
-        if "portfolio_gamma_pnl" in p.columns:
-            fig.add_trace(go.Scatter(x=p["date"], y=p["portfolio_gamma_pnl"], mode="lines", name="Gamma"), row=2, col=1)
-        if "portfolio_theta_pnl" in p.columns:
-            fig.add_trace(go.Scatter(x=p["date"], y=p["portfolio_theta_pnl"], mode="lines", name="Theta"), row=2, col=1)
-        if "portfolio_unexplained_pnl" in p.columns:
-            fig.add_trace(go.Scatter(x=p["date"], y=p["portfolio_unexplained_pnl"], mode="lines", name="Unexplained"), row=2, col=1)
+        _add_trace_if_present(fig, p, "portfolio_option_pnl", "Option", row=2, col_num=1)
+        _add_trace_if_present(fig, p, "portfolio_hedge_pnl", "Hedge", row=2, col_num=1)
+        _add_trace_if_present(fig, p, "portfolio_skew_vega_pnl", "Skew Vega", row=2, col_num=1)
+        _add_trace_if_present(fig, p, "portfolio_level_vega_pnl", "Level Vega", row=2, col_num=1)
+        _add_trace_if_present(fig, p, "portfolio_gamma_pnl", "Gamma", row=2, col_num=1)
+        _add_trace_if_present(fig, p, "portfolio_theta_pnl", "Theta", row=2, col_num=1)
+        _add_trace_if_present(fig, p, "portfolio_unexplained_pnl", "Unexplained", row=2, col_num=1)
         fig.add_trace(go.Scatter(x=p["date"], y=p["portfolio_cost"], mode="lines", name="Cost"), row=2, col=1)
         fig.add_trace(go.Scatter(x=p["date"], y=p["rolling_sharpe_63d"], mode="lines", name="Sharpe63d"), row=2, col=2)
 
@@ -254,9 +252,12 @@ def plot_backtest_analytics(backtest: BacktestOutput, engine: Literal["plotly", 
             col=2,
         )
         fig.update_layout(height=1600, title="Backtest Risk & Performance Dashboard", hovermode="x unified")
+        # Show date tick labels on every time-series panel (shared_xaxes hides them by default)
+        fig.update_xaxes(showticklabels=True, tickformat="%b %Y")
         fig.show()
         return summary
 
+    import matplotlib.dates as mdates
     fig, axes = plt.subplots(5, 2, figsize=(16, 18), sharex="col")
     axes = axes.reshape(5, 2)
     axes[0, 0].plot(p["date"], p["portfolio_cum_net_pnl"], label="Cum Net")
@@ -302,6 +303,16 @@ def plot_backtest_analytics(backtest: BacktestOutput, engine: Literal["plotly", 
     axes[3, 1].set_title("Hedge Shares by Ticker"); axes[3, 1].grid(alpha=0.25); axes[3, 1].legend(ncol=2, fontsize=8)
     axes[4, 0].set_title("Turnover by Ticker"); axes[4, 0].grid(alpha=0.25); axes[4, 0].legend(ncol=2, fontsize=8)
     axes[4, 1].bar(attribution["ticker"], attribution["net_pnl"]); axes[4, 1].set_title("Ticker Net PnL Attribution"); axes[4, 1].grid(alpha=0.25)
+
+    # Show date labels on all time-series panels (sharex="col" hides them except on the bottom row)
+    date_fmt = mdates.DateFormatter("%b %Y")
+    for ax in axes[:, 0]:
+        ax.xaxis.set_major_formatter(date_fmt)
+        plt.setp(ax.get_xticklabels(), visible=True, rotation=45, ha="right")
+    for ax in axes[:-1, 1]:  # skip the bar chart in [4, 1]
+        ax.xaxis.set_major_formatter(date_fmt)
+        plt.setp(ax.get_xticklabels(), visible=True, rotation=45, ha="right")
+
     plt.tight_layout()
     plt.show()
     return summary

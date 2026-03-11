@@ -4,12 +4,7 @@ from dataclasses import asdict, dataclass
 from typing import Dict, Iterable, List, Tuple
 
 import numpy as np
-
-try:
-    import torch
-except Exception:  # pragma: no cover - optional dependency
-    torch = None
-
+from scipy.optimize import minimize, minimize_scalar
 
 ArrayLike = np.ndarray
 
@@ -164,246 +159,183 @@ def _initial_theta_from_atm(k: ArrayLike, t_key: ArrayLike, w: ArrayLike, uniq_t
     return np.maximum(theta, 1e-8)
 
 
-def _constraint_penalty(rho: float, eta: float, gamma: float) -> float:
-    p = 0.0
-    if abs(rho) >= 0.999:
-        p += 1e3 * (abs(rho) - 0.999) ** 2
-    if eta <= 0.0:
-        p += 1e3 + 1e3 * eta * eta
-    if not (0.0 < gamma < 1.0):
-        d = min(abs(gamma - 1e-6), abs(gamma - (1.0 - 1e-6)))
-        p += 1e3 + 1e3 * d * d
-    # Conservative sufficient condition often used in practice for SSVI power-law.
-    p += 10.0 * max(0.0, eta * (1.0 + abs(rho)) - 2.0) ** 2
-    return p
+# Deterministic starting points covering the admissible parameter space.
+_PARAM_SEEDS: List[Tuple[float, float, float]] = [
+    (-0.4, 0.50, 0.50),
+    (-0.2, 0.80, 0.40),
+    (-0.6, 0.35, 0.65),
+    (-0.1, 1.00, 0.30),
+    (-0.7, 0.25, 0.70),
+    ( 0.0, 0.60, 0.50),
+    (-0.5, 0.70, 0.45),
+    (-0.3, 0.45, 0.55),
+]
 
 
-def _loss_for_params(
-    rho: float,
-    eta: float,
-    gamma: float,
+def _loss_and_grad(
+    x: np.ndarray,
     k: ArrayLike,
     theta_for_obs: ArrayLike,
-    w_true: ArrayLike,
+    w: ArrayLike,
     weights: ArrayLike,
-) -> float:
-    w_pred = ssvi_total_variance(k, theta_for_obs, rho=rho, eta=eta, gamma=gamma)
-    mse = np.average((w_pred - w_true) ** 2, weights=weights)
-    return float(mse + _constraint_penalty(rho=rho, eta=eta, gamma=gamma))
+    weight_sum: float,
+) -> Tuple[float, np.ndarray]:
+    """MSE loss + butterfly penalty, with exact gradient w.r.t. x = [rho, log_eta, gamma]."""
+    rho, log_eta, gamma = float(x[0]), float(x[1]), float(x[2])
+    eta = np.exp(log_eta)
+
+    safe_theta = np.maximum(theta_for_obs, 1e-12)
+    phi = eta * np.power(safe_theta, -gamma)
+    z = phi * k
+    zr = z + rho
+    r = np.maximum(np.sqrt(zr * zr + (1.0 - rho * rho)), 1e-12)
+
+    w_pred = 0.5 * safe_theta * (1.0 + rho * z + r)
+    residual = w_pred - w
+    wr = weights * residual
+    mse = float(np.dot(wr, residual) / weight_sum)
+
+    # Shared sub-expression: ρ + (z+ρ)/r
+    rho_plus_zrr = rho + zr / r
+
+    # dw/dρ = ½θ·z·(1 + 1/r)
+    dw_drho = 0.5 * safe_theta * z * (1.0 + 1.0 / r)
+    # dw/d(log η) = ½θ·z·(ρ + (z+ρ)/r)   [chain rule: d/d(log η) = η·d/dη]
+    dw_dlogeta = 0.5 * safe_theta * z * rho_plus_zrr
+    # dw/dγ = −½θ·z·ln(θ)·(ρ + (z+ρ)/r)
+    dw_dgamma = -0.5 * safe_theta * z * np.log(safe_theta) * rho_plus_zrr
+
+    scale = 2.0 / weight_sum
+    grad_mse = np.array([
+        scale * float(np.dot(wr, dw_drho)),
+        scale * float(np.dot(wr, dw_dlogeta)),
+        scale * float(np.dot(wr, dw_dgamma)),
+    ])
+
+    # Butterfly penalty and its gradient.
+    v = eta * (1.0 + abs(rho)) - 2.0
+    if v > 0.0:
+        penalty = 10.0 * v * v
+        grad_penalty = np.array([
+            20.0 * v * eta * np.sign(rho),
+            20.0 * v * eta * (1.0 + abs(rho)),  # d/d(log η) = η · d/dη
+            0.0,
+        ])
+    else:
+        penalty = 0.0
+        grad_penalty = np.zeros(3)
+
+    return mse + penalty, grad_mse + grad_penalty
+
+
+def _optimize_global_params(
+    k: ArrayLike,
+    theta_for_obs: ArrayLike,
+    w: ArrayLike,
+    weights: ArrayLike,
+    seeds: List[Tuple[float, float, float]],
+) -> Tuple[float, float, float]:
+    """Fit (rho, eta, gamma) via L-BFGS-B with analytical gradient.
+
+    eta is log-transformed so the optimiser works with simple box bounds.
+    """
+    weight_sum = float(np.sum(weights))
+    args = (k, theta_for_obs, w, weights, weight_sum)
+    bounds = [(-0.995, 0.995), (np.log(1e-4), np.log(5.0)), (0.01, 0.99)]
+
+    best_loss = np.inf
+    best_params: Tuple[float, float, float] = seeds[0]
+
+    for rho0, eta0, gamma0 in seeds:
+        x0 = np.array([rho0, np.log(eta0), gamma0])
+        result = minimize(_loss_and_grad, x0, jac=True, method="L-BFGS-B", bounds=bounds, args=args, options={"maxiter": 2000, "ftol": 1e-14})
+        if result.fun < best_loss:
+            best_loss = result.fun
+            rho, log_eta, gamma = result.x
+            best_params = (float(rho), float(np.exp(log_eta)), float(gamma))
+
+    return best_params
 
 
 def _optimize_theta_nodes(
     rho: float,
     eta: float,
     gamma: float,
-    uniq_t: ArrayLike,
     theta_nodes: ArrayLike,
     by_t_index: Iterable[ArrayLike],
     k: ArrayLike,
     w: ArrayLike,
 ) -> ArrayLike:
+    """Fit each theta_i independently via bounded scalar minimisation, then enforce monotonicity."""
     new_theta = theta_nodes.copy()
     for i, idx in enumerate(by_t_index):
+        k_i, w_i = k[idx], w[idx]
         theta0 = max(new_theta[i], 1e-8)
-        grid = theta0 * np.geomspace(0.5, 1.5, 31)
-        if theta0 < 1e-6:
-            grid = np.geomspace(1e-8, 1e-2, 31)
-        losses = []
-        for th in grid:
-            w_pred = ssvi_total_variance(k[idx], np.full(len(idx), th), rho=rho, eta=eta, gamma=gamma)
-            losses.append(float(np.mean((w_pred - w[idx]) ** 2)))
-        best = float(grid[int(np.argmin(losses))])
-        new_theta[i] = max(best, 1e-8)
 
-    # Enforce non-decreasing total variance term structure.
-    new_theta = np.maximum.accumulate(new_theta)
-    return new_theta
+        def obj(th: float, k_i: ArrayLike = k_i, w_i: ArrayLike = w_i) -> float:
+            w_pred = ssvi_total_variance(k_i, np.full(len(k_i), th), rho=rho, eta=eta, gamma=gamma)
+            return float(np.mean((w_pred - w_i) ** 2))
+
+        result = minimize_scalar(obj, bounds=(max(theta0 * 0.05, 1e-8), theta0 * 20.0), method="bounded")
+        new_theta[i] = max(float(result.x), 1e-8)
+
+    return np.maximum.accumulate(new_theta)
 
 
-def _resolve_calibration_backend(calibration_backend: str) -> str:
-    b = str(calibration_backend).lower()
-    if b == "auto":
-        if torch is not None and getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
-            return "mps"
-        if torch is not None and torch.cuda.is_available():
-            return "cuda"
-        return "cpu"
-    if b not in {"cpu", "mps", "cuda"}:
-        raise ValueError(f"Unsupported calibration backend '{calibration_backend}'. Use one of: auto, cpu, mps, cuda.")
-    return b
-
-
-def _calibrate_ssvi_surface_torch(
-    k: ArrayLike,
-    t: ArrayLike,
-    sigma: ArrayLike,
-    t_key: ArrayLike,
-    uniq_t: ArrayLike,
-    by_t_index: List[ArrayLike],
-    theta_nodes_base: ArrayLike,
-    random_seed: int,
-    n_param_steps: int,
-    n_theta_steps: int,
+def _make_seeds(
     n_restarts: int,
     initial_params: Tuple[float, float, float] | None,
-    theta_smoothness_lambda: float,
-    device_name: str,
-) -> Tuple[Tuple[float, float, float], ArrayLike]:
-    if torch is None:
-        raise RuntimeError("PyTorch is not installed. Install torch to use GPU/MPS calibration.")
-
-    if device_name == "mps":
-        if getattr(torch.backends, "mps", None) is None or not torch.backends.mps.is_available():
-            raise RuntimeError("MPS backend requested but not available in this environment.")
-    elif device_name == "cuda":
-        if not torch.cuda.is_available():
-            raise RuntimeError("CUDA backend requested but not available in this environment.")
-
-    device = torch.device(device_name)
-    # MPS commonly lacks full float64 kernel support; use float32 there.
-    dtype = torch.float32 if device_name == "mps" else torch.float64
-
-    k_torch = torch.as_tensor(k, dtype=dtype, device=device)
-    t_torch = torch.as_tensor(t, dtype=dtype, device=device)
-    sigma_torch = torch.as_tensor(sigma, dtype=dtype, device=device)
-    w_torch = sigma_torch * sigma_torch * t_torch
-    k_row = k_torch.reshape(1, -1)
-    w_row = w_torch.reshape(1, -1)
-
-    abs_k = np.abs(k)
-    mny_w = 1.0 / (1.0 + (abs_k / 0.5) ** 2)
-    weights = (1.0 / np.sqrt(np.maximum(t, 1e-4))) * mny_w
-    weights = weights / np.mean(weights)
-    weights_torch = torch.as_tensor(weights, dtype=dtype, device=device)
-    weight_sum = torch.clamp(torch.sum(weights_torch), min=1e-12)
-
-    t_to_i = {u: i for i, u in enumerate(uniq_t)}
-    theta_obs_index = np.array([t_to_i[x] for x in t_key], dtype=np.int64)
-    theta_obs_index_torch = torch.as_tensor(theta_obs_index, dtype=torch.long, device=device)
-    by_t_index_torch = [torch.as_tensor(np.asarray(idx, dtype=np.int64), dtype=torch.long, device=device) for idx in by_t_index]
-
-    rng = np.random.default_rng(random_seed)
+    rng: np.random.Generator,
+) -> List[Tuple[float, float, float]]:
+    """Generate random starting points for the optimization restarts."""
     seeds: List[Tuple[float, float, float]] = [(-0.4, 0.5, 0.5), (-0.2, 0.8, 0.4), (-0.6, 0.35, 0.65)]
     if initial_params is not None:
         seeds = [tuple(initial_params)] + seeds
     while len(seeds) < max(1, n_restarts):
-        seeds.append(
-            (
-                float(rng.uniform(-0.9, 0.1)),
-                float(np.exp(rng.uniform(np.log(0.08), np.log(1.8)))),
-                float(rng.uniform(0.08, 0.92)),
-            )
-        )
+        seeds.append((
+            float(rng.uniform(-0.9, 0.1)),
+            float(np.exp(rng.uniform(np.log(0.08), np.log(1.8)))),
+            float(rng.uniform(0.08, 0.92)),
+        ))
+    return seeds
 
-    def _loss_batch(rho_vec: np.ndarray, eta_vec: np.ndarray, gamma_vec: np.ndarray, theta_nodes_v: np.ndarray) -> np.ndarray:
-        rho_t = torch.as_tensor(rho_vec, dtype=dtype, device=device).reshape(-1, 1)
-        eta_t = torch.as_tensor(eta_vec, dtype=dtype, device=device).reshape(-1, 1)
-        gamma_t = torch.as_tensor(gamma_vec, dtype=dtype, device=device).reshape(-1, 1)
 
-        theta_nodes_t = torch.as_tensor(theta_nodes_v, dtype=dtype, device=device)
-        theta_for_obs = torch.clamp(theta_nodes_t[theta_obs_index_torch], min=1e-12).reshape(1, -1)
-
-        phi = eta_t * torch.pow(theta_for_obs, -gamma_t)
-        z = phi * k_row
-        rad = torch.sqrt((z + rho_t) * (z + rho_t) + (1.0 - rho_t * rho_t))
-        w_pred = 0.5 * theta_for_obs * (1.0 + rho_t * z + rad)
-
-        diff2 = (w_pred - w_row) ** 2
-        mse = torch.sum(diff2 * weights_torch.reshape(1, -1), dim=1) / weight_sum
-
-        penalty = 10.0 * torch.clamp(eta_t.reshape(-1) * (1.0 + torch.abs(rho_t.reshape(-1))) - 2.0, min=0.0) ** 2
-        total = mse + penalty
-
-        d = np.diff(theta_nodes_v)
-        smooth_pen = theta_smoothness_lambda * float(np.mean(d * d)) if len(d) else 0.0
-        return total.detach().cpu().numpy() + smooth_pen
-
-    def _loss_scalar(rho_v: float, eta_v: float, gamma_v: float, theta_nodes_v: np.ndarray) -> float:
-        return float(_loss_batch(np.asarray([rho_v]), np.asarray([eta_v]), np.asarray([gamma_v]), theta_nodes_v)[0])
-
-    best_global_loss = np.inf
-    best_global = (-0.4, 0.5, 0.5)
-    best_theta = theta_nodes_base.copy()
-
-    with torch.inference_mode():
-        for r_i, seed in enumerate(seeds[: max(1, n_restarts)]):
-            theta_nodes = theta_nodes_base.copy()
-            best = seed
-            best_loss = _loss_scalar(best[0], best[1], best[2], theta_nodes)
-
-            step_rho = max(0.03, 0.08 / (1.0 + 0.5 * r_i))
-            step_eta = max(0.08, 0.18 / (1.0 + 0.5 * r_i))
-            step_gamma = max(0.03, 0.08 / (1.0 + 0.5 * r_i))
-
-            for _ in range(n_theta_steps):
-                rho_prop = np.clip(best[0] + rng.normal(0.0, step_rho, size=n_param_steps), -0.995, 0.995)
-                eta_prop = np.clip(best[1] * np.exp(rng.normal(0.0, step_eta, size=n_param_steps)), 1e-4, 5.0)
-                gamma_prop = np.clip(best[2] + rng.normal(0.0, step_gamma, size=n_param_steps), 0.01, 0.99)
-                batch_losses = _loss_batch(rho_prop, eta_prop, gamma_prop, theta_nodes)
-                best_i = int(np.argmin(batch_losses))
-                if float(batch_losses[best_i]) < best_loss:
-                    best_loss = float(batch_losses[best_i])
-                    best = (float(rho_prop[best_i]), float(eta_prop[best_i]), float(gamma_prop[best_i]))
-
-                # Batch local coordinate proposals to reduce host/device sync overhead.
-                dr = np.asarray(
-                    [(-0.02, 0.0, 0.0), (0.02, 0.0, 0.0), (0.0, -0.05, 0.0), (0.0, 0.05, 0.0), (0.0, 0.0, -0.02), (0.0, 0.0, 0.02)],
-                    dtype=np.float64,
-                )
-                rho_loc = np.clip(best[0] + dr[:, 0], -0.995, 0.995)
-                eta_loc = np.clip(best[1] * np.exp(dr[:, 1]), 1e-4, 5.0)
-                gamma_loc = np.clip(best[2] + dr[:, 2], 0.01, 0.99)
-                local_losses = _loss_batch(rho_loc, eta_loc, gamma_loc, theta_nodes)
-                local_i = int(np.argmin(local_losses))
-                if float(local_losses[local_i]) < best_loss:
-                    best_loss = float(local_losses[local_i])
-                    best = (float(rho_loc[local_i]), float(eta_loc[local_i]), float(gamma_loc[local_i]))
-
-                rho, eta, gamma = best
-                theta_new = theta_nodes.copy()
-                for i, idx_t in enumerate(by_t_index_torch):
-                    theta0 = max(theta_new[i], 1e-8)
-                    grid = theta0 * np.geomspace(0.5, 1.5, 31)
-                    if theta0 < 1e-6:
-                        grid = np.geomspace(1e-8, 1e-2, 31)
-
-                    k_idx = k_torch[idx_t].reshape(1, -1)
-                    w_idx = w_torch[idx_t].reshape(1, -1)
-                    grid_t = torch.as_tensor(grid, dtype=dtype, device=device).reshape(-1, 1)
-
-                    phi = eta * torch.pow(torch.clamp(grid_t, min=1e-12), -gamma)
-                    z = phi * k_idx
-                    rad = torch.sqrt((z + rho) * (z + rho) + (1.0 - rho * rho))
-                    w_pred = 0.5 * grid_t * (1.0 + rho * z + rad)
-                    losses = torch.mean((w_pred - w_idx) ** 2, dim=1)
-                    theta_new[i] = float(grid[int(torch.argmin(losses).item())])
-
-                theta_nodes = np.maximum.accumulate(np.maximum(theta_new, 1e-8))
-                best_loss = _loss_scalar(rho, eta, gamma, theta_nodes)
-                step_rho *= 0.85
-                step_eta *= 0.88
-                step_gamma *= 0.85
-
-            if best_loss < best_global_loss:
-                best_global_loss = best_loss
-                best_global = best
-                best_theta = theta_nodes.copy()
-
-    return best_global, best_theta
+def _compute_calibration_diagnostics(
+    k: ArrayLike,
+    t: ArrayLike,
+    sigma: ArrayLike,
+    rho: float,
+    eta: float,
+    gamma: float,
+    theta_nodes: ArrayLike,
+    t_to_i: dict,
+    t_key: ArrayLike,
+) -> SSVIDiagnostics:
+    """Compute fit quality diagnostics after calibration."""
+    theta_for_obs = np.array([theta_nodes[t_to_i[x]] for x in t_key], dtype=np.float64)
+    w = sigma * sigma * t
+    w_fit = ssvi_total_variance(k, theta_for_obs, rho=rho, eta=eta, gamma=gamma)
+    sigma_fit = np.sqrt(np.maximum(w_fit, 1e-12) / np.maximum(t, 1e-12))
+    rmse_w = float(np.sqrt(np.mean((w_fit - w) ** 2)))
+    rmse_sigma = float(np.sqrt(np.mean((sigma_fit - sigma) ** 2)))
+    no_bfly_score = float(max(0.0, 2.0 - eta * (1.0 + abs(rho))))
+    return SSVIDiagnostics(
+        rmse_total_variance=rmse_w,
+        rmse_implied_volatility=rmse_sigma,
+        no_butterfly_constraint_score=no_bfly_score,
+        n_points=int(len(k)),
+        n_maturities=int(len(np.unique(t_key))),
+    )
 
 
 def calibrate_ssvi_surface(
     k: ArrayLike,
     t: ArrayLike,
     sigma: ArrayLike,
-    random_seed: int = 42,
-    n_param_steps: int = 400,
     n_theta_steps: int = 3,
     n_restarts: int = 4,
     initial_params: Tuple[float, float, float] | None = None,
     initial_theta_nodes: ArrayLike | None = None,
-    theta_smoothness_lambda: float = 1e-3,
-    calibration_backend: str = "mps",
 ) -> CalibratedSSVISurface:
     k = np.asarray(k, dtype=np.float64).reshape(-1)
     t = np.asarray(t, dtype=np.float64).reshape(-1)
@@ -416,6 +348,8 @@ def calibrate_ssvi_surface(
         raise ValueError("Need at least 2 maturities for SSVI calibration.")
 
     by_t_index = [np.where(t_key == u)[0] for u in uniq_t]
+    t_to_i = {u: i for i, u in enumerate(uniq_t)}
+
     if initial_theta_nodes is None:
         theta_nodes_base = _initial_theta_from_atm(k=k, t_key=t_key, w=w, uniq_t=uniq_t)
     else:
@@ -425,125 +359,65 @@ def calibrate_ssvi_surface(
         else:
             theta_nodes_base = _initial_theta_from_atm(k=k, t_key=t_key, w=w, uniq_t=uniq_t)
 
-    t_to_i = {u: i for i, u in enumerate(uniq_t)}
-    resolved_backend = _resolve_calibration_backend(calibration_backend)
+    abs_k = np.abs(k)
+    mny_w = 1.0 / (1.0 + (abs_k / 0.5) ** 2)
+    weights = (1.0 / np.sqrt(np.maximum(t, 1e-4))) * mny_w
+    weights = weights / np.mean(weights)
 
-    if resolved_backend in {"mps", "cuda"}:
-        best_global, best_theta = _calibrate_ssvi_surface_torch(
-            k=k,
-            t=t,
-            sigma=sigma,
-            t_key=t_key,
-            uniq_t=uniq_t,
-            by_t_index=by_t_index,
-            theta_nodes_base=theta_nodes_base,
-            random_seed=random_seed,
-            n_param_steps=n_param_steps,
-            n_theta_steps=n_theta_steps,
-            n_restarts=n_restarts,
-            initial_params=initial_params,
-            theta_smoothness_lambda=theta_smoothness_lambda,
-            device_name=resolved_backend,
-        )
-    else:
-        # robust-ish weighting: prefer liquid short maturities but avoid extreme domination
-        abs_k = np.abs(k)
-        mny_w = 1.0 / (1.0 + (abs_k / 0.5) ** 2)
-        weights = (1.0 / np.sqrt(np.maximum(t, 1e-4))) * mny_w
-        weights = weights / np.mean(weights)
+    rng = np.random.default_rng(seed=42)
+    outer_seeds = _make_seeds(n_restarts, initial_params, rng)
 
-        rng = np.random.default_rng(random_seed)
-        seeds: List[Tuple[float, float, float]] = [(-0.4, 0.5, 0.5), (-0.2, 0.8, 0.4), (-0.6, 0.35, 0.65)]
-        if initial_params is not None:
-            seeds = [tuple(initial_params)] + seeds
-        while len(seeds) < max(1, n_restarts):
-            seeds.append(
-                (
-                    float(rng.uniform(-0.9, 0.1)),
-                    float(np.exp(rng.uniform(np.log(0.08), np.log(1.8)))),
-                    float(rng.uniform(0.08, 0.92)),
-                )
+    best_global_loss = np.inf
+    best_global: Tuple[float, float, float] = outer_seeds[0]
+    best_theta = theta_nodes_base.copy()
+
+    for seed in outer_seeds[: max(1, n_restarts)]:
+        params = seed
+        theta_nodes = theta_nodes_base.copy()
+
+        for _ in range(n_theta_steps):
+            theta_for_obs = np.array([theta_nodes[t_to_i[x]] for x in t_key], dtype=np.float64)
+            # Single L-BFGS-B run from current iterate (BCD global-param step).
+            params = _optimize_global_params(
+                k=k,
+                theta_for_obs=theta_for_obs,
+                w=w,
+                weights=weights,
+                seeds=[params],
+            )
+            theta_nodes = _optimize_theta_nodes(
+                rho=params[0],
+                eta=params[1],
+                gamma=params[2],
+                theta_nodes=theta_nodes,
+                by_t_index=by_t_index,
+                k=k,
+                w=w,
             )
 
-        best_global_loss = np.inf
-        best_global = (-0.4, 0.5, 0.5)
-        best_theta = theta_nodes_base.copy()
+        theta_for_obs = np.array([theta_nodes[t_to_i[x]] for x in t_key], dtype=np.float64)
+        w_pred = ssvi_total_variance(k, theta_for_obs, rho=params[0], eta=params[1], gamma=params[2])
+        loss = float(np.mean((w_pred - w) ** 2))
+        if loss < best_global_loss:
+            best_global_loss = loss
+            best_global = params
+            best_theta = theta_nodes.copy()
 
-        def loss_with_theta_smooth(rho_v: float, eta_v: float, gamma_v: float, theta_nodes_v: np.ndarray) -> float:
-            theta_for_obs_v = np.array([theta_nodes_v[t_to_i[x]] for x in t_key], dtype=np.float64)
-            base = _loss_for_params(rho_v, eta_v, gamma_v, k, theta_for_obs_v, w, weights)
-            d = np.diff(theta_nodes_v)
-            smooth_pen = theta_smoothness_lambda * float(np.mean(d * d)) if len(d) else 0.0
-            return base + smooth_pen
-
-        for r_i, seed in enumerate(seeds[: max(1, n_restarts)]):
-            rho, eta, gamma = seed
-            theta_nodes = theta_nodes_base.copy()
-            best_loss = loss_with_theta_smooth(rho, eta, gamma, theta_nodes)
-            best = (rho, eta, gamma)
-
-            step_rho = max(0.03, 0.08 / (1.0 + 0.5 * r_i))
-            step_eta = max(0.08, 0.18 / (1.0 + 0.5 * r_i))
-            step_gamma = max(0.03, 0.08 / (1.0 + 0.5 * r_i))
-
-            for _ in range(n_theta_steps):
-                # Multi-try random local search
-                for _ in range(n_param_steps):
-                    rho_p = float(np.clip(best[0] + rng.normal(0.0, step_rho), -0.995, 0.995))
-                    eta_p = float(np.clip(best[1] * np.exp(rng.normal(0.0, step_eta)), 1e-4, 5.0))
-                    gamma_p = float(np.clip(best[2] + rng.normal(0.0, step_gamma), 0.01, 0.99))
-                    loss = loss_with_theta_smooth(rho_p, eta_p, gamma_p, theta_nodes)
-                    if loss < best_loss:
-                        best_loss = loss
-                        best = (rho_p, eta_p, gamma_p)
-
-                # Coordinate-local refinement around incumbent
-                for dr in [(-0.02, 0.0, 0.0), (0.02, 0.0, 0.0), (0.0, -0.05, 0.0), (0.0, 0.05, 0.0), (0.0, 0.0, -0.02), (0.0, 0.0, 0.02)]:
-                    rho_p = float(np.clip(best[0] + dr[0], -0.995, 0.995))
-                    eta_p = float(np.clip(best[1] * np.exp(dr[1]), 1e-4, 5.0))
-                    gamma_p = float(np.clip(best[2] + dr[2], 0.01, 0.99))
-                    loss = loss_with_theta_smooth(rho_p, eta_p, gamma_p, theta_nodes)
-                    if loss < best_loss:
-                        best_loss = loss
-                        best = (rho_p, eta_p, gamma_p)
-
-                rho, eta, gamma = best
-                theta_nodes = _optimize_theta_nodes(
-                    rho=rho,
-                    eta=eta,
-                    gamma=gamma,
-                    uniq_t=uniq_t,
-                    theta_nodes=theta_nodes,
-                    by_t_index=by_t_index,
-                    k=k,
-                    w=w,
-                )
-                best_loss = loss_with_theta_smooth(rho, eta, gamma, theta_nodes)
-                step_rho *= 0.85
-                step_eta *= 0.88
-                step_gamma *= 0.85
-
-            if best_loss < best_global_loss:
-                best_global_loss = best_loss
-                best_global = (rho, eta, gamma)
-                best_theta = theta_nodes.copy()
-
-    theta_for_obs = np.array([best_theta[t_to_i[x]] for x in t_key], dtype=np.float64)
-    w_fit = ssvi_total_variance(k, theta_for_obs, rho=best_global[0], eta=best_global[1], gamma=best_global[2])
-    sigma_fit = np.sqrt(np.maximum(w_fit, 1e-12) / np.maximum(t, 1e-12))
-    rmse_w = float(np.sqrt(np.mean((w_fit - w) ** 2)))
-    rmse_sigma = float(np.sqrt(np.mean((sigma_fit - sigma) ** 2)))
-    no_bfly_score = float(max(0.0, 2.0 - best_global[1] * (1.0 + abs(best_global[0]))))
+    diagnostics = _compute_calibration_diagnostics(
+        k=k,
+        t=t,
+        sigma=sigma,
+        rho=float(best_global[0]),
+        eta=float(best_global[1]),
+        gamma=float(best_global[2]),
+        theta_nodes=best_theta,
+        t_to_i=t_to_i,
+        t_key=t_key,
+    )
 
     return CalibratedSSVISurface(
         params=SSVIParameters(rho=float(best_global[0]), eta=float(best_global[1]), gamma=float(best_global[2])),
         t_nodes=uniq_t.astype(np.float64),
         theta_nodes=best_theta.astype(np.float64),
-        diagnostics=SSVIDiagnostics(
-            rmse_total_variance=rmse_w,
-            rmse_implied_volatility=rmse_sigma,
-            no_butterfly_constraint_score=no_bfly_score,
-            n_points=int(len(k)),
-            n_maturities=int(len(uniq_t)),
-        ),
+        diagnostics=diagnostics,
     )

@@ -1,3 +1,20 @@
+"""
+Pipeline interfaces and data containers.
+
+Architecture overview
+---------------------
+Data flows through six stages, each represented by an abstract module:
+
+  DataLoaderModule   → LoadedData        (raw options quotes per ticker)
+  DataProcessorModule → ProcessedData    (cleaned panel: k, t, sigma, F)
+  VolatilityModelModule → ModelOutput    (fitted SSVI surface per date)
+  SkewCalculatorModule  → SkewOutput     (scalar skew per ticker per date)
+  SignalGeneratorModule → SignalOutput   (z-score signals + position weights)
+  BacktestEngineModule  → BacktestOutput (PnL, greeks, costs)
+
+RunSpec carries the shared run parameters (tickers, dates, target maturity).
+StrategyPipeline wires all modules together and exposes run_* stage methods.
+"""
 from __future__ import annotations
 
 from abc import ABC, abstractmethod

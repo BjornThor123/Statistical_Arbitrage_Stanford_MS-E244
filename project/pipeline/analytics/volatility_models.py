@@ -1,3 +1,12 @@
+"""
+Volatility model analytics.
+
+plot_surface_fit_analytics(modeled, ticker)
+    — animated 3-D surface fit with a date slider (SSVI only).
+
+plot_smile_fit_analytics(modeled, ticker)
+    — animated 2-D smile fit with a date slider (linear smile only).
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -73,17 +82,22 @@ def _error_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
     return {"rmse": rmse, "mae": mae, "bias": bias, "max_abs_error": max_abs, "r2": r2}
 
 
-def plot_surface_fit_analytics(
+def _modeled_ticker_df(modeled: ModelOutput, ticker: str) -> pd.DataFrame:
+    if ticker not in modeled.model_by_ticker:
+        raise ValueError(f"Ticker '{ticker}' not found in modeled output. Available: {sorted(modeled.model_by_ticker)}")
+    out = modeled.model_by_ticker[ticker].copy()
+    if out.empty:
+        raise ValueError(f"No modeled rows for ticker '{ticker}'.")
+    return out
+
+
+def _plot_surface_fit_analytics(
     panel: pd.DataFrame,
     modeled_surface: pd.DataFrame,
     ticker: str | None = None,
     engine: Literal["plotly", "matplotlib"] = "plotly",
 ) -> pd.DataFrame:
-    """Interactive SSVI surface diagnostics with a date slider.
-
-    Plots modeled surface + observed points for each date and prints fit diagnostics.
-    Returns a DataFrame with per-date metrics.
-    """
+    """Interactive SSVI surface diagnostics with a date slider. Returns per-date metrics."""
     p = panel.copy()
     m = modeled_surface.copy()
     p["date"] = pd.to_datetime(p["date"])
@@ -93,10 +107,8 @@ def plot_surface_fit_analytics(
         p = p[p["ticker"] == ticker].copy()
         m = m[m["ticker"] == ticker].copy()
 
-    required_panel = {"date", "k", "t", "sigma"}
-    required_model = {"date", "rho", "eta", "gamma"}
-    missing_panel = required_panel - set(p.columns)
-    missing_model = required_model - set(m.columns)
+    missing_panel = {"date", "k", "t", "sigma"} - set(p.columns)
+    missing_model = {"date", "rho", "eta", "gamma"} - set(m.columns)
     if missing_panel:
         raise ValueError(f"panel missing required columns: {sorted(missing_panel)}")
     if missing_model:
@@ -113,9 +125,7 @@ def plot_surface_fit_analytics(
     for d in common_dates:
         day = p[p["date"] == d].copy()
         row = m[m["date"] == d].iloc[0]
-        rho = float(row["rho"])
-        eta = float(row["eta"])
-        gamma = float(row["gamma"])
+        rho, eta, gamma = float(row["rho"]), float(row["eta"]), float(row["gamma"])
 
         t_nodes, theta_nodes = _fit_theta_nodes_for_day(day, rho=rho, eta=eta, gamma=gamma)
         k_obs = day["k"].to_numpy(dtype=np.float64)
@@ -139,16 +149,7 @@ def plot_surface_fit_analytics(
         w_grid = ssvi_total_variance(K.ravel(), theta_grid, rho=rho, eta=eta, gamma=gamma)
         sigma_grid = np.sqrt(np.maximum(w_grid, 1e-12) / np.maximum(T.ravel(), 1e-12)).reshape(T.shape)
 
-        frames.append(
-            _FramePayload(
-                date=d,
-                observed=day,
-                k_grid=K,
-                t_grid=T,
-                sigma_grid=sigma_grid,
-                metrics=metrics,
-            )
-        )
+        frames.append(_FramePayload(date=d, observed=day, k_grid=K, t_grid=T, sigma_grid=sigma_grid, metrics=metrics))
 
     metrics_df = pd.DataFrame(metrics_rows).sort_values("date").reset_index(drop=True)
     print("Surface fit summary:")
@@ -160,72 +161,40 @@ def plot_surface_fit_analytics(
         dates = [f.date.strftime("%Y-%m-%d") for f in frames]
         traces0 = [
             go.Surface(
-                x=frames[0].k_grid,
-                y=frames[0].t_grid,
-                z=frames[0].sigma_grid,
-                colorscale="Viridis",
-                opacity=0.75,
-                name="Model surface",
-                showscale=False,
+                x=frames[0].k_grid, y=frames[0].t_grid, z=frames[0].sigma_grid,
+                colorscale="Viridis", opacity=0.75, name="Model surface", showscale=False,
             ),
             go.Scatter3d(
                 x=frames[0].observed["k"].to_numpy(dtype=np.float64),
                 y=frames[0].observed["t"].to_numpy(dtype=np.float64),
                 z=frames[0].observed["sigma"].to_numpy(dtype=np.float64),
-                mode="markers",
-                marker={"size": 3, "color": "crimson"},
-                name="Observed",
+                mode="markers", marker={"size": 3, "color": "crimson"}, name="Observed",
             ),
         ]
-        plotly_frames = []
-        for i, fr in enumerate(frames):
-            plotly_frames.append(
-                go.Frame(
-                    name=str(i),
-                    data=[
-                        go.Surface(
-                            x=fr.k_grid,
-                            y=fr.t_grid,
-                            z=fr.sigma_grid,
-                            colorscale="Viridis",
-                            opacity=0.75,
-                            showscale=False,
-                        ),
-                        go.Scatter3d(
-                            x=fr.observed["k"].to_numpy(dtype=np.float64),
-                            y=fr.observed["t"].to_numpy(dtype=np.float64),
-                            z=fr.observed["sigma"].to_numpy(dtype=np.float64),
-                            mode="markers",
-                            marker={"size": 3, "color": "crimson"},
-                        ),
-                    ],
-                    layout=go.Layout(
-                        title=(
-                            f"Surface Fit | {dates[i]} | RMSE={fr.metrics['rmse']:.4f}, "
-                            f"MAE={fr.metrics['mae']:.4f}, R2={fr.metrics['r2']:.4f}"
-                        )
+        plotly_frames = [
+            go.Frame(
+                name=str(i),
+                data=[
+                    go.Surface(x=fr.k_grid, y=fr.t_grid, z=fr.sigma_grid, colorscale="Viridis", opacity=0.75, showscale=False),
+                    go.Scatter3d(
+                        x=fr.observed["k"].to_numpy(dtype=np.float64),
+                        y=fr.observed["t"].to_numpy(dtype=np.float64),
+                        z=fr.observed["sigma"].to_numpy(dtype=np.float64),
+                        mode="markers", marker={"size": 3, "color": "crimson"},
                     ),
-                )
+                ],
+                layout=go.Layout(title=f"Surface Fit | {dates[i]} | RMSE={fr.metrics['rmse']:.4f}, MAE={fr.metrics['mae']:.4f}, R2={fr.metrics['r2']:.4f}"),
             )
+            for i, fr in enumerate(frames)
+        ]
         steps = [
-            {
-                "method": "animate",
-                "label": dates[i],
-                "args": [[str(i)], {"mode": "immediate", "frame": {"duration": 0, "redraw": True}}],
-            }
+            {"method": "animate", "label": dates[i], "args": [[str(i)], {"mode": "immediate", "frame": {"duration": 0, "redraw": True}}]}
             for i in range(len(frames))
         ]
         fig = go.Figure(data=traces0, frames=plotly_frames)
         fig.update_layout(
-            title=(
-                f"Surface Fit | {dates[0]} | RMSE={frames[0].metrics['rmse']:.4f}, "
-                f"MAE={frames[0].metrics['mae']:.4f}, R2={frames[0].metrics['r2']:.4f}"
-            ),
-            scene={
-                "xaxis_title": "Log-moneyness k",
-                "yaxis_title": "Maturity t (years)",
-                "zaxis_title": "Implied vol sigma",
-            },
+            title=f"Surface Fit | {dates[0]} | RMSE={frames[0].metrics['rmse']:.4f}, MAE={frames[0].metrics['mae']:.4f}, R2={frames[0].metrics['r2']:.4f}",
+            scene={"xaxis_title": "Log-moneyness k", "yaxis_title": "Maturity t (years)", "zaxis_title": "Implied vol sigma"},
             sliders=[{"active": 0, "steps": steps, "x": 0.08, "len": 0.86}],
             margin={"l": 0, "r": 0, "t": 60, "b": 0},
         )
@@ -241,30 +210,17 @@ def plot_surface_fit_analytics(
     def _draw(idx: int) -> None:
         frame = frames[idx]
         ax.clear()
-        ax.plot_surface(
-            frame.k_grid,
-            frame.t_grid,
-            frame.sigma_grid,
-            alpha=0.6,
-            cmap="viridis",
-            linewidth=0,
-            antialiased=True,
-        )
+        ax.plot_surface(frame.k_grid, frame.t_grid, frame.sigma_grid, alpha=0.6, cmap="viridis", linewidth=0, antialiased=True)
         ax.scatter(
             frame.observed["k"].to_numpy(dtype=np.float64),
             frame.observed["t"].to_numpy(dtype=np.float64),
             frame.observed["sigma"].to_numpy(dtype=np.float64),
-            c="crimson",
-            s=14,
-            alpha=0.9,
+            c="crimson", s=14, alpha=0.9,
         )
         ax.set_xlabel("Log-moneyness k")
         ax.set_ylabel("Maturity t (years)")
         ax.set_zlabel("Implied vol sigma")
-        ax.set_title(
-            f"Surface Fit | {frame.date.date()} | "
-            f"RMSE={frame.metrics['rmse']:.4f}, MAE={frame.metrics['mae']:.4f}, R2={frame.metrics['r2']:.4f}"
-        )
+        ax.set_title(f"Surface Fit | {frame.date.date()} | RMSE={frame.metrics['rmse']:.4f}, MAE={frame.metrics['mae']:.4f}, R2={frame.metrics['r2']:.4f}")
         fig.canvas.draw_idle()
 
     _draw(0)
@@ -273,17 +229,13 @@ def plot_surface_fit_analytics(
     return metrics_df
 
 
-def plot_smile_fit_analytics(
+def _plot_smile_fit_analytics(
     panel: pd.DataFrame,
     modeled_smile: pd.DataFrame,
     ticker: str | None = None,
     engine: Literal["plotly", "matplotlib"] = "plotly",
 ) -> pd.DataFrame:
-    """Interactive linear-smile diagnostics with a date slider.
-
-    Plots observed smile points and fitted line for each date and prints fit diagnostics.
-    Returns a DataFrame with per-date metrics.
-    """
+    """Interactive linear-smile diagnostics with a date slider. Returns per-date metrics."""
     p = panel.copy()
     m = modeled_smile.copy()
     p["date"] = pd.to_datetime(p["date"])
@@ -293,10 +245,8 @@ def plot_smile_fit_analytics(
         p = p[p["ticker"] == ticker].copy()
         m = m[m["ticker"] == ticker].copy()
 
-    required_panel = {"date", "k", "t", "sigma"}
-    required_model = {"date", "smile_slope", "smile_intercept", "target_t"}
-    missing_panel = required_panel - set(p.columns)
-    missing_model = required_model - set(m.columns)
+    missing_panel = {"date", "k", "t", "sigma"} - set(p.columns)
+    missing_model = {"date", "smile_slope", "smile_intercept", "target_t"} - set(m.columns)
     if missing_panel:
         raise ValueError(f"panel missing required columns: {sorted(missing_panel)}")
     if missing_model:
@@ -328,17 +278,7 @@ def plot_smile_fit_analytics(
         metrics_rows.append(metrics_row)
 
         k_line = np.linspace(np.nanquantile(k_obs, 0.01), np.nanquantile(k_obs, 0.99), 100)
-        sigma_line = intercept + slope * k_line
-        frames.append(
-            {
-                "date": d,
-                "obs": day,
-                "k_line": k_line,
-                "sigma_line": sigma_line,
-                "metrics": metrics,
-                "target_t": target_t,
-            }
-        )
+        frames.append({"date": d, "obs": day, "k_line": k_line, "sigma_line": intercept + slope * k_line, "metrics": metrics, "target_t": target_t})
 
     if not frames:
         raise ValueError("No smile frames built. Verify panel maturities around target_t.")
@@ -354,72 +294,30 @@ def plot_smile_fit_analytics(
         f0 = frames[0]
         fig = go.Figure(
             data=[
-                go.Scatter(
-                    x=f0["obs"]["k"].to_numpy(dtype=np.float64),
-                    y=f0["obs"]["sigma"].to_numpy(dtype=np.float64),
-                    mode="markers",
-                    marker={"size": 6, "color": "royalblue"},
-                    name="Observed",
-                ),
-                go.Scatter(
-                    x=f0["k_line"],
-                    y=f0["sigma_line"],
-                    mode="lines",
-                    line={"width": 3, "color": "crimson"},
-                    name="Fitted smile",
-                ),
+                go.Scatter(x=f0["obs"]["k"].to_numpy(dtype=np.float64), y=f0["obs"]["sigma"].to_numpy(dtype=np.float64), mode="markers", marker={"size": 6, "color": "royalblue"}, name="Observed"),
+                go.Scatter(x=f0["k_line"], y=f0["sigma_line"], mode="lines", line={"width": 3, "color": "crimson"}, name="Fitted smile"),
             ]
         )
         fig.frames = [
             go.Frame(
                 name=str(i),
                 data=[
-                    go.Scatter(
-                        x=fr["obs"]["k"].to_numpy(dtype=np.float64),
-                        y=fr["obs"]["sigma"].to_numpy(dtype=np.float64),
-                        mode="markers",
-                        marker={"size": 6, "color": "royalblue"},
-                    ),
-                    go.Scatter(
-                        x=fr["k_line"],
-                        y=fr["sigma_line"],
-                        mode="lines",
-                        line={"width": 3, "color": "crimson"},
-                    ),
+                    go.Scatter(x=fr["obs"]["k"].to_numpy(dtype=np.float64), y=fr["obs"]["sigma"].to_numpy(dtype=np.float64), mode="markers", marker={"size": 6, "color": "royalblue"}),
+                    go.Scatter(x=fr["k_line"], y=fr["sigma_line"], mode="lines", line={"width": 3, "color": "crimson"}),
                 ],
-                layout=go.Layout(
-                    title=(
-                        f"Smile Fit | {dates[i]} | target_t={fr['target_t']:.4f} "
-                        f"| RMSE={fr['metrics']['rmse']:.4f}, MAE={fr['metrics']['mae']:.4f}, "
-                        f"R2={fr['metrics']['r2']:.4f}"
-                    )
-                ),
+                layout=go.Layout(title=f"Smile Fit | {dates[i]} | target_t={fr['target_t']:.4f} | RMSE={fr['metrics']['rmse']:.4f}, MAE={fr['metrics']['mae']:.4f}, R2={fr['metrics']['r2']:.4f}"),
             )
             for i, fr in enumerate(frames)
         ]
         fig.update_layout(
-            title=(
-                f"Smile Fit | {dates[0]} | target_t={f0['target_t']:.4f} "
-                f"| RMSE={f0['metrics']['rmse']:.4f}, MAE={f0['metrics']['mae']:.4f}, "
-                f"R2={f0['metrics']['r2']:.4f}"
-            ),
+            title=f"Smile Fit | {dates[0]} | target_t={f0['target_t']:.4f} | RMSE={f0['metrics']['rmse']:.4f}, MAE={f0['metrics']['mae']:.4f}, R2={f0['metrics']['r2']:.4f}",
             xaxis_title="Log-moneyness k",
             yaxis_title="Implied vol sigma",
-            sliders=[
-                {
-                    "active": 0,
-                    "steps": [
-                        {
-                            "method": "animate",
-                            "label": dates[i],
-                            "args": [[str(i)], {"mode": "immediate", "frame": {"duration": 0, "redraw": True}}],
-                        }
-                        for i in range(len(frames))
-                    ],
-                    "x": 0.08,
-                    "len": 0.86,
-                }
-            ],
+            sliders=[{
+                "active": 0,
+                "steps": [{"method": "animate", "label": dates[i], "args": [[str(i)], {"mode": "immediate", "frame": {"duration": 0, "redraw": True}}]} for i in range(len(frames))],
+                "x": 0.08, "len": 0.86,
+            }],
         )
         fig.show()
         return metrics_df
@@ -433,24 +331,13 @@ def plot_smile_fit_analytics(
         frame = frames[idx]
         ax.clear()
         day = frame["obs"]
-        ax.scatter(
-            day["k"].to_numpy(dtype=np.float64),
-            day["sigma"].to_numpy(dtype=np.float64),
-            c="royalblue",
-            s=18,
-            alpha=0.85,
-            label="Observed",
-        )
+        ax.scatter(day["k"].to_numpy(dtype=np.float64), day["sigma"].to_numpy(dtype=np.float64), c="royalblue", s=18, alpha=0.85, label="Observed")
         ax.plot(frame["k_line"], frame["sigma_line"], color="crimson", linewidth=2.2, label="Fitted smile")
         ax.set_xlabel("Log-moneyness k")
         ax.set_ylabel("Implied vol sigma")
         ax.legend(loc="best")
         ax.grid(alpha=0.25)
-        ax.set_title(
-            f"Smile Fit | {frame['date'].date()} | target_t={frame['target_t']:.4f} "
-            f"| RMSE={frame['metrics']['rmse']:.4f}, MAE={frame['metrics']['mae']:.4f}, "
-            f"R2={frame['metrics']['r2']:.4f}"
-        )
+        ax.set_title(f"Smile Fit | {frame['date'].date()} | target_t={frame['target_t']:.4f} | RMSE={frame['metrics']['rmse']:.4f}, MAE={frame['metrics']['mae']:.4f}, R2={frame['metrics']['r2']:.4f}")
         fig.canvas.draw_idle()
 
     _draw(0)
@@ -459,27 +346,14 @@ def plot_smile_fit_analytics(
     return metrics_df
 
 
-def _modeled_ticker_df(modeled: ModelOutput, ticker: str) -> pd.DataFrame:
-    if ticker not in modeled.model_by_ticker:
-        raise ValueError(f"Ticker '{ticker}' not found in modeled output. Available: {sorted(modeled.model_by_ticker)}")
-    out = modeled.model_by_ticker[ticker].copy()
-    if out.empty:
-        raise ValueError(f"No modeled rows for ticker '{ticker}'.")
-    return out
-
-
-def plot_surface_fit_analytics_from_output(modeled: ModelOutput, ticker: str) -> pd.DataFrame:
-    """Surface analytics using only volatility-model output for one ticker."""
+def plot_surface_fit_analytics(modeled: ModelOutput, ticker: str) -> pd.DataFrame:
+    """SSVI surface fit diagnostics for one ticker from ModelOutput."""
     if modeled.representation != "surface":
         raise ValueError(f"Expected modeled.representation='surface', got '{modeled.representation}'.")
     modeled_df = _modeled_ticker_df(modeled, ticker=ticker)
-    needed = {"obs_k", "obs_t", "obs_sigma"}
-    missing = needed - set(modeled_df.columns)
+    missing = {"obs_k", "obs_t", "obs_sigma"} - set(modeled_df.columns)
     if missing:
-        raise ValueError(
-            f"Modeled output missing observed-point columns {sorted(missing)}. "
-            "Re-run after updating volatility model modules."
-        )
+        raise ValueError(f"Modeled output missing observed-point columns {sorted(missing)}. Re-run after updating volatility model modules.")
 
     panel_rows: List[Dict[str, object]] = []
     for _, r in modeled_df.iterrows():
@@ -489,21 +363,17 @@ def plot_surface_fit_analytics_from_output(modeled: ModelOutput, ticker: str) ->
         for ki, ti, si in zip(k, t, sigma):
             panel_rows.append({"date": pd.Timestamp(r["date"]), "ticker": ticker, "k": ki, "t": ti, "sigma": si})
     panel = pd.DataFrame(panel_rows)
-    return plot_surface_fit_analytics(panel=panel, modeled_surface=modeled_df, ticker=ticker)
+    return _plot_surface_fit_analytics(panel=panel, modeled_surface=modeled_df, ticker=ticker)
 
 
-def plot_smile_fit_analytics_from_output(modeled: ModelOutput, ticker: str) -> pd.DataFrame:
-    """Smile analytics using only volatility-model output for one ticker."""
+def plot_smile_fit_analytics(modeled: ModelOutput, ticker: str) -> pd.DataFrame:
+    """Linear smile fit diagnostics for one ticker from ModelOutput."""
     if modeled.representation != "smile":
         raise ValueError(f"Expected modeled.representation='smile', got '{modeled.representation}'.")
     modeled_df = _modeled_ticker_df(modeled, ticker=ticker)
-    needed = {"obs_k", "obs_sigma"}
-    missing = needed - set(modeled_df.columns)
+    missing = {"obs_k", "obs_sigma"} - set(modeled_df.columns)
     if missing:
-        raise ValueError(
-            f"Modeled output missing observed-point columns {sorted(missing)}. "
-            "Re-run after updating volatility model modules."
-        )
+        raise ValueError(f"Modeled output missing observed-point columns {sorted(missing)}. Re-run after updating volatility model modules.")
 
     panel_rows: List[Dict[str, object]] = []
     for _, r in modeled_df.iterrows():
@@ -513,4 +383,4 @@ def plot_smile_fit_analytics_from_output(modeled: ModelOutput, ticker: str) -> p
         for ki, si in zip(k, sigma):
             panel_rows.append({"date": pd.Timestamp(r["date"]), "ticker": ticker, "k": ki, "t": target_t, "sigma": si})
     panel = pd.DataFrame(panel_rows)
-    return plot_smile_fit_analytics(panel=panel, modeled_smile=modeled_df, ticker=ticker)
+    return _plot_smile_fit_analytics(panel=panel, modeled_smile=modeled_df, ticker=ticker)

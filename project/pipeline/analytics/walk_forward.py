@@ -1,3 +1,9 @@
+"""
+Walk-forward analytics.
+
+plot_walk_forward_analytics(wf)  — OOS PnL, drawdown, window scores, selected candidates.
+summarize_walk_forward(wf)       — single-row summary table (Sharpe, MDD, n_windows).
+"""
 from __future__ import annotations
 
 from typing import Literal
