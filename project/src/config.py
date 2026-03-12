@@ -14,7 +14,13 @@ class Config:
     tte_target: int = 15
     max_tte: int = 30
     sector_ticker = "XLF"
-    entry_threshold: float = 1.0
+    # Entry threshold mode:
+    #   "absolute"   — enter when |z| > entry_threshold (fixed z-score value)
+    #   "percentile" — enter when z exceeds its expanding empirical quantile
+    #                  at level entry_threshold_pct (no lookahead)
+    entry_threshold_mode: Literal["absolute", "percentile"] = "percentile"
+    entry_threshold: float = 1.0          # used when mode == "absolute"
+    entry_threshold_pct: float = 0.95     # used when mode == "percentile"
     exit_threshold: float = 0.0
     delta_target: float = 0.25
     # Skew measure used for signal construction.

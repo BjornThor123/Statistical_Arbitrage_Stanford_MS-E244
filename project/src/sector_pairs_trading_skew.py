@@ -187,7 +187,9 @@ def compute_spread_signals(
     betas: pd.DataFrame,
     sector_ticker: str = config.sector_ticker,
     signal_window: int = 60,
+    entry_threshold_mode: str = config.entry_threshold_mode,
     entry_threshold: float = config.entry_threshold,
+    entry_threshold_pct: float = config.entry_threshold_pct,
     exit_threshold: float = config.exit_threshold,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
@@ -196,6 +198,17 @@ def compute_spread_signals(
     Spread:  spread_{i,t} = skew_i - β_i * skew_sector
 
     Z-score: z_{i,t} = (spread - rolling_mean) / rolling_std
+
+    Entry threshold modes
+    --------------------
+    "absolute"   : enter when z > entry_threshold (or z < -entry_threshold).
+                   Fixed cutoff, same for all tickers and dates.
+    "percentile" : at each date t, the upper cutoff is the entry_threshold_pct
+                   quantile of the z-score's own expanding history (all
+                   observations up to and including t).  The lower cutoff is
+                   the symmetric (1 − pct) quantile.  min_periods is set to
+                   signal_window so the threshold only activates once the
+                   rolling z-score is meaningful — no lookahead bias.
 
     Signal:
         +1  stock skew high vs sector → sell stock skew, buy sector skew
@@ -219,14 +232,33 @@ def compute_spread_signals(
     rolling_std  = spread_df.rolling(signal_window).std()
     z_scores     = (spread_df - rolling_mean) / rolling_std
 
-    # Hysteresis signal (identical logic to original strategy)
+    # ── Entry thresholds ──────────────────────────────────────────────────────
+    if entry_threshold_mode == "percentile":
+        # Expanding quantile computed from history up to t only (no lookahead).
+        # min_periods matches signal_window so thresholds activate together with z-scores.
+        upper_thresh = z_scores.expanding(min_periods=signal_window).quantile(entry_threshold_pct)
+        lower_thresh = z_scores.expanding(min_periods=signal_window).quantile(1.0 - entry_threshold_pct)
+        up_arr = upper_thresh.to_numpy()
+        lo_arr = lower_thresh.to_numpy()
+    elif entry_threshold_mode == "absolute":
+        # Broadcast scalar thresholds to arrays for uniform loop logic below
+        up_arr = np.full_like(z_scores.to_numpy(), fill_value=entry_threshold)
+        lo_arr = np.full_like(z_scores.to_numpy(), fill_value=-entry_threshold)
+    else:
+        raise ValueError(f"Unknown entry_threshold_mode: {entry_threshold_mode!r}. Use 'absolute' or 'percentile'.")
+
+    # ── Hysteresis signal loop ────────────────────────────────────────────────
     z_arr = z_scores.to_numpy()
     sig   = np.zeros_like(z_arr, dtype=int)
 
     for t in range(1, len(z_arr)):
         z    = z_arr[t]
         prev = sig[t - 1]
-        nan  = np.isnan(z)
+        z_up = up_arr[t]
+        z_lo = lo_arr[t]
+
+        # Treat as NaN if z-score or either threshold is unavailable
+        nan   = np.isnan(z) | np.isnan(z_up) | np.isnan(z_lo)
 
         flat  = (prev == 0)  & ~nan
         long  = (prev == 1)  & ~nan
@@ -235,12 +267,12 @@ def compute_spread_signals(
         sig[t] = np.select(
             [
                 nan,
-                flat  & (z >  entry_threshold),
-                flat  & (z < -entry_threshold),
+                flat  & (z >  z_up),
+                flat  & (z <  z_lo),
                 long  & (z >= exit_threshold),
-                long  & (z < -entry_threshold),
+                long  & (z <  z_lo),
                 short & (z <= -exit_threshold),
-                short & (z >  entry_threshold),
+                short & (z >  z_up),
             ],
             [0, 1, -1, 1, -1, -1, 1],
             default=0,
@@ -257,7 +289,9 @@ def run_strategy(
     tte_days: int = config.tte_target,
     delta_target: float = config.delta_target,
     estimation_window: int = 60,
+    entry_threshold_mode: str = config.entry_threshold_mode,
     entry_threshold: float = config.entry_threshold,
+    entry_threshold_pct: float = config.entry_threshold_pct,
     exit_threshold: float = config.exit_threshold,
     sector_ticker: str = config.sector_ticker,
     skew_path: Path | str = config.skew_path,
@@ -294,7 +328,9 @@ def run_strategy(
         skew_pivot, betas,
         sector_ticker=sector_ticker,
         signal_window=estimation_window,
+        entry_threshold_mode=entry_threshold_mode,
         entry_threshold=entry_threshold,
+        entry_threshold_pct=entry_threshold_pct,
         exit_threshold=exit_threshold,
     )
 
