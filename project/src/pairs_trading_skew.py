@@ -121,9 +121,11 @@ def select_risk_reversal_legs(
             "call_mid":      float(best_call["mid_price"]),
             "call_delta":    float(best_call["delta"]),
             "call_tte":      float(best_call["tte_days"]),
+            "call_spread":   float(best_call["spread"]),
             "put_mid":       float(best_put["mid_price"]),
             "put_delta":     float(best_put["delta"]),
             "put_tte":       float(best_put["tte_days"]),
+            "put_spread":    float(best_put["spread"]),
             "spot_price":    spot,
             "contract_size": contract_size,
             "rr_value":      float(best_call["mid_price"]) - float(best_put["mid_price"]),
@@ -143,7 +145,7 @@ def select_risk_reversal_legs(
 def compute_pair_betas(
     skew_pivot: pd.DataFrame,
     pairs: List[Tuple[str, str]],
-    estimation_window: int = 60,
+    estimation_window: int = config.estimation_window,
 ) -> pd.DataFrame:
     """
     For each pair (i, j), estimate rolling OLS beta:
@@ -171,7 +173,7 @@ def compute_pair_signals(
     skew_pivot: pd.DataFrame,
     betas: pd.DataFrame,
     pairs: List[Tuple[str, str]],
-    signal_window: int = 60,
+    signal_window: int = config.signal_window,
     entry_threshold_mode: str = config.entry_threshold_mode,
     entry_threshold: float = config.entry_threshold,
     entry_threshold_pct: float = config.entry_threshold_pct,
@@ -254,7 +256,7 @@ def run_strategy(
     df: pd.DataFrame,
     tte_days: int = config.tte_target,
     delta_target: float = config.delta_target,
-    estimation_window: int = 60,
+    estimation_window: int = config.estimation_window,
     entry_threshold_mode: str = config.entry_threshold_mode,
     entry_threshold: float = config.entry_threshold,
     entry_threshold_pct: float = config.entry_threshold_pct,
@@ -344,10 +346,8 @@ def compute_portfolio_returns(
     rr    = stock_rr_legs["rr_value"].unstack("ticker")
     spot  = stock_rr_legs["spot_price"].unstack("ticker")
     delta = stock_rr_legs["net_delta"].unstack("ticker")
-    call_mid = stock_rr_legs["call_mid"].unstack("ticker")
-    put_mid  = stock_rr_legs["put_mid"].unstack("ticker")
 
-    for df_ in (rr, spot, delta, call_mid, put_mid):
+    for df_ in (rr, spot, delta):
         df_.index = pd.to_datetime(df_.index)
 
     # ── Common date index across all needed tickers ───────────────────────────
@@ -365,8 +365,6 @@ def compute_portfolio_returns(
     rr_a       = rr.reindex(common_idx)[available]
     spot_a     = spot.reindex(common_idx)[available]
     delta_a    = delta.reindex(common_idx)[available]
-    call_mid_a = call_mid.reindex(common_idx)[available]
-    put_mid_a  = put_mid.reindex(common_idx)[available]
 
     # Pre-compute daily diffs and lags (per ticker)
     d_rr    = rr_a.diff()
@@ -403,22 +401,47 @@ def compute_portfolio_returns(
     gross_returns = pair_ret_df.multiply(weight, axis=0).sum(axis=1)
 
     # ── Transaction costs ─────────────────────────────────────────────────────
+    # Two components, both expressed as fractions of the respective spot price:
+    #
+    # 1. Option legs: half the bid-ask spread per leg (we trade at mid, so the
+    #    true execution cost is 0.5 × spread on each of the call and put).
+    #      cost = 0.5 × (call_spread + put_spread) / spot
+    #
+    # 2. Delta hedge (stock): transaction_cost_bps of the notional stock value.
+    #    Notional = |net_delta| × spot, so as a fraction of spot:
+    #      cost = transaction_cost_bps / 10_000 × |net_delta|
+    #
+    # Transition multipliers (number of complete round-trips):
+    #   Entry (0 → ±1):  1
+    #   Exit  (±1 → 0):  1
+    #   Flip  (±1 → ∓1): 2 (close + open)
+
     prev_sig  = signals_a.shift(1).fillna(0).astype(int)
     entering  = (signals_a != 0) & (prev_sig == 0)
     exiting   = (signals_a == 0) & (prev_sig != 0)
     flipping  = (signals_a != 0) & (prev_sig != 0) & (signals_a != prev_sig)
     rr_trades = entering.astype(float) + exiting.astype(float) + flipping.astype(float) * 2
 
-    # Cost per RR pair trade: bps of (call_mid + put_mid) / spot for each leg
+    call_spread = stock_rr_legs["call_spread"].unstack("ticker")
+    put_spread  = stock_rr_legs["put_spread"].unstack("ticker")
+    for df_ in (call_spread, put_spread):
+        df_.index = pd.to_datetime(df_.index)
+    call_spread_a = call_spread.reindex(common_idx)[available]
+    put_spread_a  = put_spread.reindex(common_idx)[available]
+
     cost_df = pd.DataFrame(0.0, index=common_idx, columns=signals_a.columns)
     for a, b in pairs:
         key = _pair_key(a, b)
         if key not in cost_df.columns or a not in available or b not in available:
             continue
         beta_lag = betas_a[key].shift(1).abs()
-        ratio_a = (call_mid_a[a] + put_mid_a[a]) / spot_a[a]
-        ratio_b = (call_mid_a[b] + put_mid_a[b]) / spot_a[b]
-        cost_df[key] = (transaction_cost_bps / 10_000) * (ratio_a + beta_lag * ratio_b)
+        # Option cost: half bid-ask spread per leg, as fraction of respective spot
+        opt_cost_a = 0.5 * (call_spread_a[a] + put_spread_a[a]) / spot_a[a]
+        opt_cost_b = 0.5 * (call_spread_a[b] + put_spread_a[b]) / spot_a[b]
+        # Delta hedge cost: bps of notional (|net_delta| × spot) / spot = bps × |net_delta|
+        hedge_cost_a = (transaction_cost_bps / 10_000) * delta_prev[a].abs()
+        hedge_cost_b = (transaction_cost_bps / 10_000) * delta_prev[b].abs()
+        cost_df[key] = opt_cost_a + beta_lag * opt_cost_b + hedge_cost_a + beta_lag * hedge_cost_b
 
     txn_cost = (cost_df * rr_trades).multiply(weight, axis=0).sum(axis=1)
     n_trades  = rr_trades.sum(axis=1)

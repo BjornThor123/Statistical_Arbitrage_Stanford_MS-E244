@@ -45,7 +45,8 @@ Total pair return:
 
 Notes
 -----
-- Mid prices assumed tradable (optimistic; ignores bid-ask spread).
+- Mid prices assumed tradable (optimistic; ignores bid-ask spread, but 
+accounts for it in transaction costs).
 - β is recomputed each day from the rolling OLS, consistent with the signal.
 - One unit = one option contract (100 shares) on each leg.
 """
@@ -136,9 +137,11 @@ def select_risk_reversal_legs(
             "call_mid":      float(best_call["mid_price"]),
             "call_delta":    float(best_call["delta"]),
             "call_tte":      float(best_call["tte_days"]),
+            "call_spread":   float(best_call["spread"]),
             "put_mid":       float(best_put["mid_price"]),
             "put_delta":     float(best_put["delta"]),
             "put_tte":       float(best_put["tte_days"]),
+            "put_spread":    float(best_put["spread"]),
             "spot_price":    spot,
             "contract_size": contract_size,
             "rr_value":      float(best_call["mid_price"]) - float(best_put["mid_price"]),
@@ -158,7 +161,7 @@ def select_risk_reversal_legs(
 def compute_rolling_betas(
     skew_pivot: pd.DataFrame,
     sector_ticker: str = config.sector_ticker,
-    estimation_window: int = 60,
+    estimation_window: int = config.estimation_window,
 ) -> pd.DataFrame:
     """
     Return a DataFrame of rolling OLS betas (date × stock_ticker).
@@ -186,7 +189,7 @@ def compute_spread_signals(
     skew_pivot: pd.DataFrame,
     betas: pd.DataFrame,
     sector_ticker: str = config.sector_ticker,
-    signal_window: int = 60,
+    signal_window: int = config.signal_window,
     entry_threshold_mode: str = config.entry_threshold_mode,
     entry_threshold: float = config.entry_threshold,
     entry_threshold_pct: float = config.entry_threshold_pct,
@@ -288,7 +291,7 @@ def run_strategy(
     df: pd.DataFrame,
     tte_days: int = config.tte_target,
     delta_target: float = config.delta_target,
-    estimation_window: int = 60,
+    estimation_window: int = config.estimation_window,
     entry_threshold_mode: str = config.entry_threshold_mode,
     entry_threshold: float = config.entry_threshold,
     entry_threshold_pct: float = config.entry_threshold_pct,
@@ -470,18 +473,20 @@ def compute_portfolio_returns(
     gross_returns = pair_ret.multiply(weight, axis=0).sum(axis=1)
 
     # ── Transaction costs ─────────────────────────────────────────────────────
-    # Options are bought/sold at the option price, so transaction costs scale
-    # with the option mid-price, not the underlying stock price. We express the
-    # cost in the same units as gross_returns (i.e. as a fraction of spot) by
-    # multiplying bps by the option-to-spot ratio:
+    # Two components, both expressed as fractions of the respective spot price:
     #
-    #   cost_per_rr_pair = bps/10000 × [(call_mid + put_mid)/spot   ← stock leg
-    #                                  + |β| × (sec_call + sec_put)/sec_spot]  ← sector leg
+    # 1. Option legs: half the bid-ask spread per leg (we trade at mid, so the
+    #    true execution cost is 0.5 × spread on each of the call and put).
+    #      cost = 0.5 × (call_spread + put_spread) / spot
     #
-    # Transition types and number of complete RR pair trades they incur:
-    #   Entry (0 → ±1):  1 pair opened
-    #   Exit  (±1 → 0):  1 pair closed
-    #   Flip  (±1 → ∓1): 2 pairs (close old + open new)
+    # 2. Delta hedge (stock): transaction_cost_bps of the notional stock value.
+    #    Notional = |net_delta| × spot, so as a fraction of spot:
+    #      cost = transaction_cost_bps / 10_000 × |net_delta|
+    #
+    # Transition multipliers (number of complete round-trips):
+    #   Entry (0 → ±1):  1
+    #   Exit  (±1 → 0):  1
+    #   Flip  (±1 → ∓1): 2 (close + open)
 
     prev_sig = signals.shift(1).fillna(0).astype(int)
     entering = (signals != 0) & (prev_sig == 0)
@@ -490,28 +495,33 @@ def compute_portfolio_returns(
 
     rr_pair_trades = entering.astype(float) + exiting.astype(float) + flipping.astype(float) * 2
 
-    # Stock leg option value as fraction of spot
-    stock_call_mid = stock_rr_legs["call_mid"].unstack("ticker")
-    stock_put_mid  = stock_rr_legs["put_mid"].unstack("ticker")
-    stock_call_mid.index = pd.to_datetime(stock_call_mid.index)
-    stock_put_mid.index  = pd.to_datetime(stock_put_mid.index)
-    stock_call_mid = stock_call_mid.reindex(common_idx)[common_tickers]
-    stock_put_mid  = stock_put_mid.reindex(common_idx)[common_tickers]
-    stock_opt_ratio = (stock_call_mid + stock_put_mid) / stock_spot  # typically 3–8%
+    # ── Option bid-ask cost ───────────────────────────────────────────────────
+    stock_call_spread = stock_rr_legs["call_spread"].unstack("ticker")
+    stock_put_spread  = stock_rr_legs["put_spread"].unstack("ticker")
+    stock_call_spread.index = pd.to_datetime(stock_call_spread.index)
+    stock_put_spread.index  = pd.to_datetime(stock_put_spread.index)
+    stock_call_spread = stock_call_spread.reindex(common_idx)[common_tickers]
+    stock_put_spread  = stock_put_spread.reindex(common_idx)[common_tickers]
+    stock_opt_cost = 0.5 * (stock_call_spread + stock_put_spread) / stock_spot
 
-    # Sector leg option value as fraction of sector spot (β-scaled)
-    sec_call_mid_s = sector_rr_legs["call_mid"].xs(sector_ticker, level="ticker")
-    sec_put_mid_s  = sector_rr_legs["put_mid"].xs(sector_ticker, level="ticker")
-    sec_call_mid_s.index = pd.to_datetime(sec_call_mid_s.index)
-    sec_put_mid_s.index  = pd.to_datetime(sec_put_mid_s.index)
-    sec_opt_ratio = (
-        sec_call_mid_s.reindex(common_idx) + sec_put_mid_s.reindex(common_idx)
-    ) / sec_spot  # typically 1–4%
+    sec_call_spread_s = sector_rr_legs["call_spread"].xs(sector_ticker, level="ticker")
+    sec_put_spread_s  = sector_rr_legs["put_spread"].xs(sector_ticker, level="ticker")
+    sec_call_spread_s.index = pd.to_datetime(sec_call_spread_s.index)
+    sec_put_spread_s.index  = pd.to_datetime(sec_put_spread_s.index)
+    sec_opt_cost = (
+        0.5 * (sec_call_spread_s.reindex(common_idx) + sec_put_spread_s.reindex(common_idx))
+    ) / sec_spot
 
-    # Cost per 1 complete RR pair trade as fraction of stock spot
-    cost_per_rr_pair = (transaction_cost_bps / 10_000) * (
-        stock_opt_ratio
-        + lagged_beta.abs().multiply(sec_opt_ratio.values, axis="index")
+    # ── Delta hedge stock cost ────────────────────────────────────────────────
+    stock_hedge_cost = (transaction_cost_bps / 10_000) * stock_delta.shift(1).abs()
+    sec_hedge_cost   = (transaction_cost_bps / 10_000) * sec_delta.shift(1).abs()
+
+    # ── Total cost per 1 complete RR pair trade ───────────────────────────────
+    cost_per_rr_pair = (
+        stock_opt_cost
+        + lagged_beta.abs().multiply(sec_opt_cost.values, axis="index")
+        + stock_hedge_cost
+        + lagged_beta.abs().multiply(sec_hedge_cost.values, axis="index")
     )
 
     txn_cost = (cost_per_rr_pair * rr_pair_trades).multiply(weight, axis=0).sum(axis=1)

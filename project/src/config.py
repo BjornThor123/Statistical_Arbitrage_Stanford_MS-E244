@@ -21,6 +21,8 @@ class Config:
     entry_threshold_mode: Literal["absolute", "percentile"] = "percentile"
     entry_threshold: float = 1.0          # used when mode == "absolute"
     entry_threshold_pct: float = 0.95     # used when mode == "percentile"
+    estimation_window: int = 60
+    signal_window: int = 60
     exit_threshold: float = 0.0
     delta_target: float = 0.25
     # Skew measure used for signal construction.
@@ -34,7 +36,7 @@ class Config:
     #   ~200–500 bps of option value = typical bid-ask half-spread
     #   ~50–100 bps            = tight/liquid execution (e.g. market-maker access)
     #   ~10–30 bps             = very optimistic lower bound
-    transaction_cost_bps: float = 50
+    transaction_cost_bps: float = 20
     max_position_frac: float = 0.20
 
     relevant_option_columns: List[str] = field(default_factory=lambda: [
