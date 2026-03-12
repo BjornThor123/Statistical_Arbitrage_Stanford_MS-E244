@@ -155,6 +155,82 @@ def extract_skew_df(
 
         return vh_skew
 
+    def _compute_gamma_hedge_skew(df,tte_days, delta_target = 0.25):
+        available_ttes = df["tte_days"].dropna().unique()
+        if len(available_ttes) == 0:
+            return np.nan
+        
+        closest_tte = available_ttes[np.argmin(np.abs(available_ttes-tte_days))]
+        slice_df = df[df["tte_days"] == closest_tte].copy()
+
+        puts = slice_df[slice_df["cp_flag"] == "P"].copy()
+        calls = slice_df[slice_df["cp_flag"] == "C"].copy()
+
+        puts["delta_distance"] = (puts["delta"].abs() - delta_target).abs()
+        calls["delta_distance"] = (calls["delta"] - delta_target).abs()
+
+        put25 = puts.loc[puts["delta_distance"].idxmin()]
+        call25 = calls.loc[calls["delta_distance"].idxmin()]
+
+        sigma_call = call25["impl_volatility"]
+        sigma_put = put25["impl_volatility"]
+
+        gamma_call = call25["gamma"]
+        gamma_put = put25["gamma"]
+        h_t = gamma_put / gamma_call
+
+        skew = sigma_put - h_t * sigma_call
+        
+        return skew
+
+    
+    def _compute_naive_skew(df, tte_days):
+        df = df.copy()
+        available_ttes = df["tte_days"].dropna().unique()
+        if len(available_ttes) == 0:
+            return np.nan
+        
+        closest_tte = available_ttes[np.argmin(np.abs(available_ttes-tte_days))]
+        df = df[df["tte_days"] == closest_tte].copy()
+        df = df.sort_values("strike")
+
+        if len(df) < 2:
+            return np.nan
+
+        left_k = df.iloc[0]["strike"]
+        right_k = df.iloc[-1]["strike"]
+
+        left_iv = df.iloc[0]["impl_volatility"]
+        right_iv = df.iloc[-1]["impl_volatility"]
+
+        skew = (right_iv - left_iv) / (right_k - left_k)
+
+        return skew
+
+    def _compute_log_moneyness_skew(df, tte_days): 
+        df = df.copy()
+        available_ttes = df["tte_days"].dropna().unique()
+        if len(available_ttes) == 0:
+            return np.nan
+        
+        closest_tte = available_ttes[np.argmin(np.abs(available_ttes-tte_days))]
+        df = df[df["tte_days"] == closest_tte].copy()
+
+        df = df.sort_values("log_moneyness")
+        
+        if len(df) < 2:
+            return np.nan
+
+        left_lm = df.iloc[0]["log_moneyness"]
+        right_lm = df.iloc[-1]["log_moneyness"]
+
+        left_iv = df.iloc[0]["impl_volatility"]
+        right_iv = df.iloc[-1]["impl_volatility"]
+
+        skew = (right_iv - left_iv) / (right_lm - left_lm)
+
+        return skew
+    
 
     # ── Per-ticker loop ───────────────────────────────────────────────────────
 
@@ -188,6 +264,12 @@ def extract_skew_df(
             skew_series = df_stock.groupby('date').apply(_compute_direct_skew)
         elif skew_method == "vega_hedged":
             skew_series = df_stock.groupby('date').apply(_compute_vega_hedge_skew, tte_days = tte_days, delta_target = delta_target, reference = "atm")
+        elif skew_method == "naive":
+            skew_series = df_stock.groupby('date').apply(_compute_naive_skew, tte_days = tte_days)
+        elif skew_method == "logmoneyness":
+            skew_series = df_stock.groupby('date').apply(_compute_log_moneyness_skew, tte_days = tte_days)
+        elif skew_method == "gamma_hedged":
+            skew_series = df_stock.groupby('date').apply(_compute_gamma_hedge_skew, tte_days = tte_days, delta_target = delta_target)
         else:  # polynomial
             skew_series = -df_stock.groupby('date')[
                 ['log_moneyness', 'impl_volatility', 'tte_days']
@@ -221,7 +303,6 @@ def extract_skew_df(
     print(out_skew.reset_index()["ticker"].value_counts())
 
     return out_skew, out_clean
-
 
 
 def main():

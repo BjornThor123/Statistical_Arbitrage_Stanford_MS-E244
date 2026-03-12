@@ -21,14 +21,12 @@ class Config:
     entry_threshold_mode: Literal["absolute", "percentile"] = "percentile"
     entry_threshold: float = 1.0          # used when mode == "absolute"
     entry_threshold_pct: float = 0.95     # used when mode == "percentile"
-    estimation_window: int = 60
-    signal_window: int = 60
     exit_threshold: float = 0.0
     delta_target: float = 0.25
     # Skew measure used for signal construction.
     # "direct"     — IV_25Δ_put − IV_25Δ_call at tte_target (matches the traded instrument)
     # "polynomial" — −β from IV = α + β·log(K/F) + γ·log(K/F)² (negated so high = puts expensive)
-    skew_method: Literal["direct", "vega_hedged", "polynomial"] = "direct"
+    skew_method: Literal["naive", "logmoneyness", "direct", "vega_hedged", "gamma_hedged","polynomial"] = "polynomial"
     initial_capital: float = 1_000_000.0
     # Transaction cost in bps of the total option mid-price (call + put) per RR leg traded.
     # Costs are applied proportionally to option value, not stock price.
