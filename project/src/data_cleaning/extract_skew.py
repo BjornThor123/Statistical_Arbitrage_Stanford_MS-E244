@@ -176,9 +176,10 @@ def extract_skew_df(
         df_stock = impute_impl_vol_bs(df_stock)
         if verbose: print(f'Done imputing missing implied volatilities for {ticker}')
 
+        iv_daily_90th = df_stock.groupby('date')['impl_volatility'].transform(lambda x: x.quantile(0.9))
         clean_filters = (
             (df_stock['tte_days'] >= 4) &
-            (df_stock['impl_volatility'] <= df_stock['impl_volatility'].quantile(q=0.9))
+            (df_stock['impl_volatility'] <= iv_daily_90th)
         )
         df_stock = df_stock.loc[clean_filters]
 

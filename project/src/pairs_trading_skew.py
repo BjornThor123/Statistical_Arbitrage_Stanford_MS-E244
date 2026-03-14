@@ -146,6 +146,7 @@ def compute_pair_betas(
     skew_pivot: pd.DataFrame,
     pairs: List[Tuple[str, str]],
     estimation_window: int = config.estimation_window,
+    min_periods_frac: float = config.min_periods_frac,
 ) -> pd.DataFrame:
     """
     For each pair (i, j), estimate rolling OLS beta:
@@ -156,12 +157,13 @@ def compute_pair_betas(
     """
     betas = pd.DataFrame(np.nan, index=skew_pivot.index,
                          columns=[_pair_key(a, b) for a, b in pairs])
+    min_periods = max(2, int(estimation_window * min_periods_frac))
 
     for a, b in pairs:
         if a not in skew_pivot.columns or b not in skew_pivot.columns:
             continue
-        rolling_cov = skew_pivot[a].rolling(estimation_window).cov(skew_pivot[b])
-        rolling_var = skew_pivot[b].rolling(estimation_window).var()
+        rolling_cov = skew_pivot[a].rolling(estimation_window, min_periods=min_periods).cov(skew_pivot[b])
+        rolling_var = skew_pivot[b].rolling(estimation_window, min_periods=min_periods).var()
         betas[_pair_key(a, b)] = rolling_cov / rolling_var
 
     return betas
@@ -174,6 +176,7 @@ def compute_pair_signals(
     betas: pd.DataFrame,
     pairs: List[Tuple[str, str]],
     signal_window: int = config.signal_window,
+    min_periods_frac: float = config.min_periods_frac,
     entry_threshold_mode: str = config.entry_threshold_mode,
     entry_threshold: float = config.entry_threshold,
     entry_threshold_pct: float = config.entry_threshold_pct,
@@ -201,8 +204,9 @@ def compute_pair_signals(
             continue
         spread_df[key] = skew_pivot[a] - betas[key] * skew_pivot[b]
 
-    rolling_mean = spread_df.rolling(signal_window).mean()
-    rolling_std  = spread_df.rolling(signal_window).std()
+    min_periods = max(2, int(signal_window * min_periods_frac))
+    rolling_mean = spread_df.rolling(signal_window, min_periods=min_periods).mean()
+    rolling_std  = spread_df.rolling(signal_window, min_periods=min_periods).std()
     z_scores     = (spread_df - rolling_mean) / rolling_std
 
     # ── Entry thresholds ──────────────────────────────────────────────────────

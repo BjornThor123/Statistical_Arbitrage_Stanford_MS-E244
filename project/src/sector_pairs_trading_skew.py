@@ -162,6 +162,7 @@ def compute_rolling_betas(
     skew_pivot: pd.DataFrame,
     sector_ticker: str = config.sector_ticker,
     estimation_window: int = config.estimation_window,
+    min_periods_frac: float = config.min_periods_frac,
 ) -> pd.DataFrame:
     """
     Return a DataFrame of rolling OLS betas (date × stock_ticker).
@@ -173,11 +174,11 @@ def compute_rolling_betas(
     stock_tickers = [t for t in skew_pivot.columns if t != sector_ticker]
 
     betas = pd.DataFrame(np.nan, index=skew_pivot.index, columns=stock_tickers)
-    
+    min_periods = max(2, int(estimation_window * min_periods_frac))
 
     for ticker in stock_tickers:
-        rolling_cov = skew_pivot[ticker].rolling(estimation_window).cov(sec_skew)
-        rolling_var = sec_skew.rolling(estimation_window).var()
+        rolling_cov = skew_pivot[ticker].rolling(estimation_window, min_periods=min_periods).cov(sec_skew)
+        rolling_var = sec_skew.rolling(estimation_window, min_periods=min_periods).var()
         betas[ticker] = rolling_cov / rolling_var
 
     return betas
@@ -190,6 +191,7 @@ def compute_spread_signals(
     betas: pd.DataFrame,
     sector_ticker: str = config.sector_ticker,
     signal_window: int = config.signal_window,
+    min_periods_frac: float = config.min_periods_frac,
     entry_threshold_mode: str = config.entry_threshold_mode,
     entry_threshold: float = config.entry_threshold,
     entry_threshold_pct: float = config.entry_threshold_pct,
@@ -231,16 +233,19 @@ def compute_spread_signals(
         spread_df[ticker] = skew_pivot[ticker] - betas[ticker] * sec_skew
 
     # Z-score the spread
-    rolling_mean = spread_df.rolling(signal_window).mean()
-    rolling_std  = spread_df.rolling(signal_window).std()
+    min_periods = max(2, int(signal_window * min_periods_frac))
+    rolling_mean = spread_df.rolling(signal_window, min_periods=min_periods).mean()
+    rolling_std  = spread_df.rolling(signal_window, min_periods=min_periods).std()
     z_scores     = (spread_df - rolling_mean) / rolling_std
 
     # ── Entry thresholds ──────────────────────────────────────────────────────
     if entry_threshold_mode == "percentile":
         # Expanding quantile computed from history up to t only (no lookahead).
         # min_periods matches signal_window so thresholds activate together with z-scores.
-        upper_thresh = z_scores.expanding(min_periods=signal_window).quantile(entry_threshold_pct)
-        lower_thresh = z_scores.expanding(min_periods=signal_window).quantile(1.0 - entry_threshold_pct)
+        # upper_thresh = z_scores.expanding(min_periods=signal_window).quantile(entry_threshold_pct)
+        # lower_thresh = z_scores.expanding(min_periods=signal_window).quantile(1.0 - entry_threshold_pct)
+        upper_thresh = z_scores.rolling(window=signal_window).quantile(entry_threshold_pct)
+        lower_thresh = z_scores.rolling(window=signal_window).quantile(1.0 - entry_threshold_pct)
         up_arr = upper_thresh.to_numpy()
         lo_arr = lower_thresh.to_numpy()
     elif entry_threshold_mode == "absolute":
@@ -518,8 +523,8 @@ def compute_portfolio_returns(
 
     # ── Total cost per 1 complete RR pair trade ───────────────────────────────
     cost_per_rr_pair = (
-        stock_opt_cost
-        + lagged_beta.abs().multiply(sec_opt_cost.values, axis="index")
+        # stock_opt_cost
+        # + lagged_beta.abs().multiply(sec_opt_cost.values, axis="index")
         + stock_hedge_cost
         + lagged_beta.abs().multiply(sec_hedge_cost.values, axis="index")
     )

@@ -10,7 +10,7 @@ class Config:
     cleaned_options_path: Path = Path("data/cleaned_options.parquet")
     plot_dir: Path = Path("plots")
     start_date: datetime = datetime(2015, 1, 1)
-    end_date: datetime = datetime(2020, 12, 31)
+    end_date: datetime = datetime(2025, 12, 31)
     tte_target: int = 15
     max_tte: int = 30
     sector_ticker = "XLF"
@@ -23,6 +23,11 @@ class Config:
     entry_threshold_pct: float = 0.95     # used when mode == "percentile"
     estimation_window: int = 60
     signal_window: int = 60
+    # Minimum fraction of the estimation/signal window required for rolling
+    # calculations (beta, spread mean/std).  Values in [0.5, 0.75] prevent
+    # stale pre-gap data from contaminating post-gap estimates while still
+    # allowing computation when a few observations are missing.
+    min_periods_frac: float = 0.5
     exit_threshold: float = 0.0
     delta_target: float = 0.25
     # Skew measure used for signal construction.
