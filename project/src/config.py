@@ -33,7 +33,7 @@ class Config:
     # Skew measure used for signal construction.
     # "direct"     — IV_25Δ_put − IV_25Δ_call at tte_target (matches the traded instrument)
     # "polynomial" — −β from IV = α + β·log(K/F) + γ·log(K/F)² (negated so high = puts expensive)
-    skew_method: Literal["direct", "vega_hedged", "polynomial"] = "direct"
+    skew_method: Literal["naive", "logmoneyness", "direct", "vega_hedged", "gamma_hedged","polynomial"] = "polynomial"
     initial_capital: float = 1_000_000.0
     # Transaction cost in bps of the total option mid-price (call + put) per RR leg traded.
     # Costs are applied proportionally to option value, not stock price.
