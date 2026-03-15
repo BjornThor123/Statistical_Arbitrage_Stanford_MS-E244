@@ -333,6 +333,7 @@ def compute_portfolio_returns(
     initial_capital: float = config.initial_capital,
     max_position_frac: float = config.max_position_frac,
     transaction_cost_bps: float = config.transaction_cost_bps,
+    option_cost_mode: str = config.option_cost_mode,
 ) -> pd.DataFrame:
     """
     Simulate daily P&L from the stock-vs-stock skew spread pairs trade.
@@ -426,12 +427,26 @@ def compute_portfolio_returns(
     flipping  = (signals_a != 0) & (prev_sig != 0) & (signals_a != prev_sig)
     rr_trades = entering.astype(float) + exiting.astype(float) + flipping.astype(float) * 2
 
-    call_spread = stock_rr_legs["call_spread"].unstack("ticker")
-    put_spread  = stock_rr_legs["put_spread"].unstack("ticker")
-    for df_ in (call_spread, put_spread):
-        df_.index = pd.to_datetime(df_.index)
-    call_spread_a = call_spread.reindex(common_idx)[available]
-    put_spread_a  = put_spread.reindex(common_idx)[available]
+    if option_cost_mode == "spread":
+        opt_num_a = stock_rr_legs["call_spread"].unstack("ticker")
+        opt_num_b = stock_rr_legs["put_spread"].unstack("ticker")
+        for df_ in (opt_num_a, opt_num_b):
+            df_.index = pd.to_datetime(df_.index)
+        opt_num_a = opt_num_a.reindex(common_idx)[available]
+        opt_num_b = opt_num_b.reindex(common_idx)[available]
+        def _opt_cost(ticker, beta_lag=None):  # noqa: E306
+            return 0.5 * (opt_num_a[ticker] + opt_num_b[ticker]) / spot_a[ticker]
+    elif option_cost_mode == "bps":
+        opt_num_a = stock_rr_legs["call_mid"].unstack("ticker")
+        opt_num_b = stock_rr_legs["put_mid"].unstack("ticker")
+        for df_ in (opt_num_a, opt_num_b):
+            df_.index = pd.to_datetime(df_.index)
+        opt_num_a = opt_num_a.reindex(common_idx)[available]
+        opt_num_b = opt_num_b.reindex(common_idx)[available]
+        def _opt_cost(ticker, beta_lag=None):  # noqa: E306
+            return (transaction_cost_bps / 10_000) * (opt_num_a[ticker] + opt_num_b[ticker]) / spot_a[ticker]
+    else:
+        raise ValueError(f"Unknown option_cost_mode: {option_cost_mode!r}. Use 'spread' or 'bps'.")
 
     bidask_cost_df = pd.DataFrame(0.0, index=common_idx, columns=signals_a.columns)
     hedge_cost_df  = pd.DataFrame(0.0, index=common_idx, columns=signals_a.columns)
@@ -440,13 +455,10 @@ def compute_portfolio_returns(
         if key not in bidask_cost_df.columns or a not in available or b not in available:
             continue
         beta_lag = betas_a[key].shift(1).abs()
-        # Option cost: half bid-ask spread per leg, as fraction of respective spot
-        opt_cost_a = 0.5 * (call_spread_a[a] + put_spread_a[a]) / spot_a[a]
-        opt_cost_b = 0.5 * (call_spread_a[b] + put_spread_a[b]) / spot_a[b]
         # Delta hedge cost: bps of notional (|net_delta| × spot) / spot = bps × |net_delta|
         hedge_cost_a = (transaction_cost_bps / 10_000) * delta_prev[a].abs()
         hedge_cost_b = (transaction_cost_bps / 10_000) * delta_prev[b].abs()
-        bidask_cost_df[key] = opt_cost_a + beta_lag * opt_cost_b
+        bidask_cost_df[key] = _opt_cost(a) + beta_lag * _opt_cost(b)
         hedge_cost_df[key]  = hedge_cost_a + beta_lag * hedge_cost_b
 
     txn_bidask = (bidask_cost_df * rr_trades).multiply(weight, axis=0).sum(axis=1)
@@ -696,6 +708,7 @@ def run_backtest(
     initial_capital: float = config.initial_capital,
     max_position_frac: float = config.max_position_frac,
     transaction_cost_bps: float = config.transaction_cost_bps,
+    option_cost_mode: str = config.option_cost_mode,
     risk_free_rate: float = 0.0,
     plot_dir: Path | str = config.plot_dir / "pairs_skew_stock",
 ) -> dict:
@@ -707,6 +720,7 @@ def run_backtest(
         initial_capital=initial_capital,
         max_position_frac=max_position_frac,
         transaction_cost_bps=transaction_cost_bps,
+        option_cost_mode=option_cost_mode,
     )
 
     metrics = compute_metrics(metrics_df, risk_free_rate=risk_free_rate)

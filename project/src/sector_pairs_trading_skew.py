@@ -378,6 +378,7 @@ def compute_portfolio_returns(
     initial_capital: float = config.initial_capital,
     max_position_frac: float = config.max_position_frac,
     transaction_cost_bps: float = config.transaction_cost_bps,
+    option_cost_mode: str = config.option_cost_mode,
 ) -> pd.DataFrame:
     """
     Simulate daily P&L from the skew spread pairs trade.
@@ -501,21 +502,41 @@ def compute_portfolio_returns(
     rr_pair_trades = entering.astype(float) + exiting.astype(float) + flipping.astype(float) * 2
 
     # ── Option bid-ask cost ───────────────────────────────────────────────────
-    stock_call_spread = stock_rr_legs["call_spread"].unstack("ticker")
-    stock_put_spread  = stock_rr_legs["put_spread"].unstack("ticker")
-    stock_call_spread.index = pd.to_datetime(stock_call_spread.index)
-    stock_put_spread.index  = pd.to_datetime(stock_put_spread.index)
-    stock_call_spread = stock_call_spread.reindex(common_idx)[common_tickers]
-    stock_put_spread  = stock_put_spread.reindex(common_idx)[common_tickers]
-    stock_opt_cost = 0.5 * (stock_call_spread + stock_put_spread) / stock_spot
+    if option_cost_mode == "spread":
+        stock_call_spread = stock_rr_legs["call_spread"].unstack("ticker")
+        stock_put_spread  = stock_rr_legs["put_spread"].unstack("ticker")
+        stock_call_spread.index = pd.to_datetime(stock_call_spread.index)
+        stock_put_spread.index  = pd.to_datetime(stock_put_spread.index)
+        stock_call_spread = stock_call_spread.reindex(common_idx)[common_tickers]
+        stock_put_spread  = stock_put_spread.reindex(common_idx)[common_tickers]
+        stock_opt_cost = 0.5 * (stock_call_spread + stock_put_spread) / stock_spot
 
-    sec_call_spread_s = sector_rr_legs["call_spread"].xs(sector_ticker, level="ticker")
-    sec_put_spread_s  = sector_rr_legs["put_spread"].xs(sector_ticker, level="ticker")
-    sec_call_spread_s.index = pd.to_datetime(sec_call_spread_s.index)
-    sec_put_spread_s.index  = pd.to_datetime(sec_put_spread_s.index)
-    sec_opt_cost = (
-        0.5 * (sec_call_spread_s.reindex(common_idx) + sec_put_spread_s.reindex(common_idx))
-    ) / sec_spot
+        sec_call_spread_s = sector_rr_legs["call_spread"].xs(sector_ticker, level="ticker")
+        sec_put_spread_s  = sector_rr_legs["put_spread"].xs(sector_ticker, level="ticker")
+        sec_call_spread_s.index = pd.to_datetime(sec_call_spread_s.index)
+        sec_put_spread_s.index  = pd.to_datetime(sec_put_spread_s.index)
+        sec_opt_cost = (
+            0.5 * (sec_call_spread_s.reindex(common_idx) + sec_put_spread_s.reindex(common_idx))
+        ) / sec_spot
+    elif option_cost_mode == "bps":
+        stock_call_mid = stock_rr_legs["call_mid"].unstack("ticker")
+        stock_put_mid  = stock_rr_legs["put_mid"].unstack("ticker")
+        stock_call_mid.index = pd.to_datetime(stock_call_mid.index)
+        stock_put_mid.index  = pd.to_datetime(stock_put_mid.index)
+        stock_call_mid = stock_call_mid.reindex(common_idx)[common_tickers]
+        stock_put_mid  = stock_put_mid.reindex(common_idx)[common_tickers]
+        stock_opt_cost = (transaction_cost_bps / 10_000) * (stock_call_mid + stock_put_mid) / stock_spot
+
+        sec_call_mid_s = sector_rr_legs["call_mid"].xs(sector_ticker, level="ticker")
+        sec_put_mid_s  = sector_rr_legs["put_mid"].xs(sector_ticker, level="ticker")
+        sec_call_mid_s.index = pd.to_datetime(sec_call_mid_s.index)
+        sec_put_mid_s.index  = pd.to_datetime(sec_put_mid_s.index)
+        sec_opt_cost = (
+            (transaction_cost_bps / 10_000)
+            * (sec_call_mid_s.reindex(common_idx) + sec_put_mid_s.reindex(common_idx))
+        ) / sec_spot
+    else:
+        raise ValueError(f"Unknown option_cost_mode: {option_cost_mode!r}. Use 'spread' or 'bps'.")
 
     # ── Delta hedge stock cost ────────────────────────────────────────────────
     stock_hedge_cost = (transaction_cost_bps / 10_000) * stock_delta.shift(1).abs()
@@ -799,6 +820,7 @@ def run_backtest(
     initial_capital: float = config.initial_capital,
     max_position_frac: float = config.max_position_frac,
     transaction_cost_bps: float = config.transaction_cost_bps,
+    option_cost_mode: str = config.option_cost_mode,
     risk_free_rate: float = 0.0,
     plot_dir: Path | str = config.plot_dir / "pairs_skew",
 ) -> dict:
@@ -810,6 +832,7 @@ def run_backtest(
         initial_capital=initial_capital,
         max_position_frac=max_position_frac,
         transaction_cost_bps=transaction_cost_bps,
+        option_cost_mode=option_cost_mode,
     )
 
     metrics = compute_metrics(metrics_df, risk_free_rate=risk_free_rate)

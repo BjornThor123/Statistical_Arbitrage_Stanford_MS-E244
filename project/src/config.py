@@ -42,6 +42,10 @@ class Config:
     #   ~50–100 bps            = tight/liquid execution (e.g. market-maker access)
     #   ~10–30 bps             = very optimistic lower bound
     transaction_cost_bps: float = 20
+    # Option transaction cost method:
+    #   "spread" — use half the observed bid-ask spread per leg: 0.5*(call_spread+put_spread)/spot
+    #   "bps"    — use transaction_cost_bps of the option mid-price: bps/10000*(call_mid+put_mid)/spot
+    option_cost_mode: Literal["spread", "bps"] = "bps"
     max_position_frac: float = 0.20
 
     relevant_option_columns: List[str] = field(default_factory=lambda: [
