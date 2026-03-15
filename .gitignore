@@ -5,3 +5,15 @@ results/
 .DS_Store
 *.parquet
 *.json
+<<<<<<< HEAD
+=======
+*.xlsx
+*.xls
+*.xml
+*.yaml
+*.gz
+*.zip
+project/stat_arb.egg-info/*
+*.pyc
+*.png
+>>>>>>> origin/experimentation

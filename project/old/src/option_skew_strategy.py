@@ -3,7 +3,11 @@ Option skew arbitrage strategy — risk reversal P&L model.
 
 Pipeline
 --------
+<<<<<<< HEAD:project/old/src/option_skew_strategy.py
 1. Extract idiosyncratic skew signal (reuses construct_skew pipeline).
+=======
+1. Load pre-computed skew from parquet (run src.data_cleaning.extract_skew first).
+>>>>>>> origin/experimentation:project/src/option_skew_strategy.py
 2. For each (ticker, date), select OTM put and call legs (~25-delta, ~15 tte).
 3. Construct daily risk-reversal series: RR = call_mid - put_mid.
 4. Signal drives direction:
@@ -31,7 +35,11 @@ import pandas as pd
 import seaborn as sns
 
 from src.config import get_config
+<<<<<<< HEAD:project/old/src/option_skew_strategy.py
 from src.construct_skew import extract_skew_df, compute_idiosyncratic_skew
+=======
+from src.construct_skew import compute_idiosyncratic_skew
+>>>>>>> origin/experimentation:project/src/option_skew_strategy.py
 from src.data_loader import DataLoader
 
 config = get_config()
@@ -123,19 +131,21 @@ def select_risk_reversal_legs(
     return out.set_index(["date", "ticker"])
 
 
-# ── Signal construction (identical to simple_strat.py) ───────────────────────
+# ── Signal construction ───────────────────────────────────────────────────────
 
 def compute_signals(
     resid_df: pd.DataFrame,
-    z_threshold: float = 1.0,
+    entry_threshold: float = config.entry_threshold,
+    exit_threshold: float = config.exit_threshold,
     signal_window: int = 60,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Convert idiosyncratic skew residuals into rolling z-scores and threshold.
+    Convert idiosyncratic skew residuals into rolling z-scores, then apply a
+    two-threshold (hysteresis) rule to reduce signal churn.
 
-    +1  sell skew : z > +z_threshold → skew unusually high → expect reversion down
+    +1  sell skew : z crosses above +entry_threshold (held until z < +exit_threshold)
                     trade: long RR (sell put, buy call)
-    -1  buy  skew : z < -z_threshold → skew unusually low  → expect reversion up
+    -1  buy  skew : z crosses below -entry_threshold (held until z > -exit_threshold)
                     trade: short RR (buy put, sell call)
      0  flat
 
@@ -145,10 +155,33 @@ def compute_signals(
     rolling_std  = resid_df.rolling(signal_window).std()
     z_scores     = (resid_df - rolling_mean) / rolling_std
 
-    signals = pd.DataFrame(0, index=resid_df.index, columns=resid_df.columns)
-    signals[z_scores >  z_threshold] =  1
-    signals[z_scores < -z_threshold] = -1
+    z_arr = z_scores.to_numpy()
+    sig   = np.zeros_like(z_arr, dtype=int)
 
+    for t in range(1, len(z_arr)):
+        z    = z_arr[t]
+        prev = sig[t - 1]
+        nan  = np.isnan(z)
+
+        flat  = (prev == 0)  & ~nan
+        long  = (prev == 1)  & ~nan
+        short = (prev == -1) & ~nan
+
+        sig[t] = np.select(
+            [
+                nan,
+                flat  & (z >  entry_threshold),   # enter long
+                flat  & (z < -entry_threshold),   # enter short
+                long  & (z >= exit_threshold),    # hold long
+                long  & (z < -entry_threshold),   # flip to short
+                short & (z <= -exit_threshold),   # hold short
+                short & (z >  entry_threshold),   # flip to long
+            ],
+            [0, 1, -1, 1, -1, -1, 1],
+            default=0,                            # exit (flat + no entry)
+        )
+
+    signals = pd.DataFrame(sig, index=resid_df.index, columns=resid_df.columns)
     return signals, z_scores
 
 
@@ -159,13 +192,15 @@ def run_strategy(
     tte_days: int = 15,
     delta_target: float = 0.25,
     estimation_window: int = 60,
-    z_threshold: float = 1.0,
+    entry_threshold: float = config.entry_threshold,
+    exit_threshold: float = config.exit_threshold,
     sector_ticker: str = config.sector_ticker,
+    skew_path: Path | str = config.skew_path,
 ) -> dict:
     """
     Full strategy pipeline:
 
-    1. Extract skew β per ticker/date.
+    1. Load pre-computed skew from parquet (produced by src.data_cleaning.extract_skew).
     2. Compute idiosyncratic skew residuals vs sector ETF.
     3. Generate z-score signals.
     4. Select risk-reversal legs (OTM put + OTM call) per ticker/date.
@@ -175,8 +210,8 @@ def run_strategy(
     dict with keys:
         skew_df, skew_pivot, resid_df, z_scores, signals, rr_legs
     """
-    print("Step 1/4  Extracting skew...")
-    skew_df = extract_skew_df(df, tte_days=tte_days)
+    print("Step 1/4  Loading skew from parquet...")
+    skew_df = pd.read_parquet(skew_path)
 
     skew_pivot = (
         skew_df.reset_index()
@@ -191,7 +226,8 @@ def run_strategy(
 
     print("Step 3/4  Computing z-scores and signals...")
     signals, z_scores = compute_signals(
-        resid_df, z_threshold=z_threshold, signal_window=estimation_window
+        resid_df, entry_threshold=entry_threshold, exit_threshold=exit_threshold,
+        signal_window=estimation_window,
     )
 
     print("Step 4/4  Selecting risk-reversal option legs...")

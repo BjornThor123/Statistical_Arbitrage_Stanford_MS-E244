@@ -1,11 +1,15 @@
 import pandas as pd
 import numpy as np
 from src.config import get_config
+<<<<<<< HEAD:project/old/src/construct_skew.py
 from src.utils.black_scholes import impute_impl_vol_bs
+=======
+>>>>>>> origin/experimentation:project/src/construct_skew.py
 
 config = get_config()
 
 
+<<<<<<< HEAD:project/old/src/construct_skew.py
 # ── Skew extraction ──────────────────────────────────────────────────────────
 
 def extract_skew_df(df, tte_days=15, min_points=3, verbose = True) -> pd.DataFrame:
@@ -76,6 +80,8 @@ def extract_skew_df(df, tte_days=15, min_points=3, verbose = True) -> pd.DataFra
     return pd.concat(skew_dfs)
 
 
+=======
+>>>>>>> origin/experimentation:project/src/construct_skew.py
 # ── Idiosyncratic skew via rolling OLS ──────────────────────────────────────
 
 def compute_idiosyncratic_skew(
@@ -127,4 +133,8 @@ def compute_idiosyncratic_skew(
 
         resid_df[ticker] = stock_skew - (rolling_alpha + rolling_beta * sec_skew)
 
+<<<<<<< HEAD:project/old/src/construct_skew.py
     return resid_df
+=======
+    return resid_df
+>>>>>>> origin/experimentation:project/src/construct_skew.py

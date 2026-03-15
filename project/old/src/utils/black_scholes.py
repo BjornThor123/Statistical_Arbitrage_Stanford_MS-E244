@@ -15,6 +15,14 @@ def _bs_price(S: float, K: float, r: float, T: float, sigma: float, cp: str) -> 
         return K * np.exp(-r * T) * norm.cdf(-d2) - S * norm.cdf(-d1)
 
 
+def _bs_delta(S: float, K: float, r: float, T: float, sigma: float, cp: str) -> float:
+    """Black-Scholes delta for a European option."""
+    if np.isnan(S) or S <= 0 or np.isnan(K) or K <= 0 or T <= 0 or sigma <= 0:
+        return np.nan
+    d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
+    return norm.cdf(d1) if cp == "C" else norm.cdf(d1) - 1
+
+
 def _implied_vol_single(
     market_price: float,
     S: float,
@@ -53,7 +61,7 @@ def _implied_vol_single(
         return np.nan
 
 
-def impute_impl_vol_bs(df: pd.DataFrame) -> pd.DataFrame:
+def impute_impl_vol_bs(df: pd.DataFrame, impute_delta = True) -> pd.DataFrame:
     """Imputes implied volatility using Black-Scholes inversion for rows where
     impl_volatility is NaN.
 
@@ -92,4 +100,21 @@ def impute_impl_vol_bs(df: pd.DataFrame) -> pd.DataFrame:
     df.loc[mask, "impl_volatility"] = imputed
     # Only mark as imputed where the value was actually filled (not still NaN)
     df.loc[mask & df["impl_volatility"].notna(), "imputed_bs"] = True
+
+    if impute_delta:
+        delta_mask = df["delta"].isna() & df["impl_volatility"].notna()
+        if delta_mask.any():
+            rows = df.loc[delta_mask]
+            df.loc[delta_mask, "delta"] = rows.apply(
+                lambda row: _bs_delta(
+                    S=row["spot_price"],
+                    K=row["strike"],
+                    r=row["risk_free_rate"] if pd.notna(row["risk_free_rate"]) else 0.0,
+                    T=row["tte"],
+                    sigma=row["impl_volatility"],
+                    cp=row["cp_flag"],
+                ),
+                axis=1,
+            )
+
     return df

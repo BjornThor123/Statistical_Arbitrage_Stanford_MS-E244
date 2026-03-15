@@ -24,3 +24,7 @@ data/risk_free/metadata/*
 
 # Optional: ignore the DuckDB database file
 data/market_data.duckdb
+<<<<<<< HEAD
+=======
+*/__pycache__/
+>>>>>>> origin/experimentation

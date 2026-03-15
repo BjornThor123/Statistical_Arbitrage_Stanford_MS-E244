@@ -49,8 +49,13 @@ config = get_config()
 
 def compute_signals(
     resid_df: pd.DataFrame,
+<<<<<<< HEAD:project/old/src/simple_strat.py
     entry_threshold: float = 1.0,
     exit_threshold: float = 0.5,
+=======
+    entry_threshold: float = config.entry_threshold,
+    exit_threshold: float = config.exit_threshold,
+>>>>>>> origin/experimentation:project/src/simple_strat.py
     signal_window: int = 60,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
@@ -114,8 +119,13 @@ def run_strategy(
     df: pd.DataFrame,
     tte_days: int = 15,
     estimation_window: int = 60,
+<<<<<<< HEAD:project/old/src/simple_strat.py
     entry_threshold: float = 1.0,
     exit_threshold: float = 0.5,
+=======
+    entry_threshold: float = config.entry_threshold,
+    exit_threshold: float = config.exit_threshold,
+>>>>>>> origin/experimentation:project/src/simple_strat.py
     sector_ticker: str = config.sector_ticker,
 ) -> dict:
     """
