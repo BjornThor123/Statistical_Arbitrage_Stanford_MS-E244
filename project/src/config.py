@@ -9,7 +9,7 @@ class Config:
     skew_path: Path = Path("data/skew.parquet")
     cleaned_options_path: Path = Path("data/cleaned_options.parquet")
     plot_dir: Path = Path("plots")
-    start_date: datetime = datetime(2015, 1, 1)
+    start_date: datetime = datetime(2004, 1, 1)
     end_date: datetime = datetime(2025, 12, 31)
     tte_target: int = 15
     max_tte: int = 30
@@ -33,7 +33,7 @@ class Config:
     # Skew measure used for signal construction.
     # "direct"     — IV_25Δ_put − IV_25Δ_call at tte_target (matches the traded instrument)
     # "polynomial" — −β from IV = α + β·log(K/F) + γ·log(K/F)² (negated so high = puts expensive)
-    skew_method: Literal["naive", "logmoneyness", "direct", "vega_hedged", "gamma_hedged","polynomial"] = "polynomial"
+    skew_method: Literal["naive", "logmoneyness", "direct", "vega_hedged", "gamma_hedged","polynomial"] = "direct"
     initial_capital: float = 1_000_000.0
     # Transaction cost in bps of the total option mid-price (call + put) per RR leg traded.
     # Costs are applied proportionally to option value, not stock price.

@@ -522,14 +522,18 @@ def compute_portfolio_returns(
     sec_hedge_cost   = (transaction_cost_bps / 10_000) * sec_delta.shift(1).abs()
 
     # ── Total cost per 1 complete RR pair trade ───────────────────────────────
-    cost_per_rr_pair = (
-        # stock_opt_cost
-        # + lagged_beta.abs().multiply(sec_opt_cost.values, axis="index")
-        + stock_hedge_cost
+    bidask_per_rr = (
+        stock_opt_cost
+        + lagged_beta.abs().multiply(sec_opt_cost.values, axis="index")
+    )
+    hedge_per_rr = (
+        stock_hedge_cost
         + lagged_beta.abs().multiply(sec_hedge_cost.values, axis="index")
     )
 
-    txn_cost = (cost_per_rr_pair * rr_pair_trades).multiply(weight, axis=0).sum(axis=1)
+    txn_bidask = (bidask_per_rr * rr_pair_trades).multiply(weight, axis=0).sum(axis=1)
+    txn_hedge  = (hedge_per_rr  * rr_pair_trades).multiply(weight, axis=0).sum(axis=1)
+    txn_cost   = txn_bidask + txn_hedge
 
     # Diagnostic: RR pair trades per day
     n_trades = rr_pair_trades.sum(axis=1)
@@ -550,6 +554,8 @@ def compute_portfolio_returns(
         "sector_leg_ret":   sector_total,
         "portfolio_value":  initial_capital * cumulative_net,
         "transaction_cost": txn_cost,
+        "txn_bidask":       txn_bidask,
+        "txn_hedge":        txn_hedge,
         "active_positions": n_active,
         "n_trades":         n_trades,
         "cumulative_gross": cumulative_gross,
@@ -743,6 +749,39 @@ def plot_results(
     ax.grid(True, alpha=0.3, axis="y")
     fig.tight_layout()
     fig.savefig(plot_dir / "annual_returns.png", dpi=150)
+    plt.close(fig)
+
+    # 9. Transaction cost breakdown: bid-ask vs delta hedge
+    fig, ax = plt.subplots(figsize=(12, 5))
+    metrics_df["txn_bidask"].cumsum().plot(ax=ax, label="Bid-ask spread", linewidth=1.5)
+    metrics_df["txn_hedge"].cumsum().plot(ax=ax, label="Delta hedge", linewidth=1.5)
+    metrics_df["transaction_cost"].cumsum().plot(ax=ax, label="Total", linewidth=1.5, linestyle="--", color="black")
+    ax.yaxis.set_major_formatter(mpl_ticker.PercentFormatter(xmax=1))
+    ax.set_title("Cumulative Transaction Cost: Bid-Ask Spread vs Delta Hedge")
+    ax.set_xlabel("Date")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(plot_dir / "txn_cost_breakdown.png", dpi=150)
+    plt.close(fig)
+
+    # 10. Annual Sharpe ratio
+    annual_sharpe = (
+        metrics_df["net_returns"]
+        .groupby(metrics_df["net_returns"].index.year)
+        .apply(lambda r: (r.mean() / r.std()) * np.sqrt(252) if r.std() > 0 else np.nan)
+    )
+    colors_sharpe = ["green" if s > 0 else "red" for s in annual_sharpe]
+    fig, ax = plt.subplots(figsize=(max(6, len(annual_sharpe) * 1.2), 4))
+    annual_sharpe.plot(kind="bar", ax=ax, color=colors_sharpe, edgecolor="black")
+    ax.axhline(0, color="black", linewidth=0.8)
+    ax.axhline(1, color="grey", linewidth=0.8, linestyle="--", label="Sharpe = 1")
+    ax.set_title("Annual Sharpe Ratio (Net Returns)")
+    ax.set_xlabel("Year")
+    ax.legend()
+    ax.grid(True, alpha=0.3, axis="y")
+    fig.tight_layout()
+    fig.savefig(plot_dir / "annual_sharpe.png", dpi=150)
     plt.close(fig)
 
     print(f"Plots saved → {plot_dir.resolve()}")

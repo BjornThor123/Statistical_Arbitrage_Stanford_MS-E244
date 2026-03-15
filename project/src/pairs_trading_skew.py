@@ -433,10 +433,11 @@ def compute_portfolio_returns(
     call_spread_a = call_spread.reindex(common_idx)[available]
     put_spread_a  = put_spread.reindex(common_idx)[available]
 
-    cost_df = pd.DataFrame(0.0, index=common_idx, columns=signals_a.columns)
+    bidask_cost_df = pd.DataFrame(0.0, index=common_idx, columns=signals_a.columns)
+    hedge_cost_df  = pd.DataFrame(0.0, index=common_idx, columns=signals_a.columns)
     for a, b in pairs:
         key = _pair_key(a, b)
-        if key not in cost_df.columns or a not in available or b not in available:
+        if key not in bidask_cost_df.columns or a not in available or b not in available:
             continue
         beta_lag = betas_a[key].shift(1).abs()
         # Option cost: half bid-ask spread per leg, as fraction of respective spot
@@ -445,10 +446,13 @@ def compute_portfolio_returns(
         # Delta hedge cost: bps of notional (|net_delta| × spot) / spot = bps × |net_delta|
         hedge_cost_a = (transaction_cost_bps / 10_000) * delta_prev[a].abs()
         hedge_cost_b = (transaction_cost_bps / 10_000) * delta_prev[b].abs()
-        cost_df[key] = opt_cost_a + beta_lag * opt_cost_b + hedge_cost_a + beta_lag * hedge_cost_b
+        bidask_cost_df[key] = opt_cost_a + beta_lag * opt_cost_b
+        hedge_cost_df[key]  = hedge_cost_a + beta_lag * hedge_cost_b
 
-    txn_cost = (cost_df * rr_trades).multiply(weight, axis=0).sum(axis=1)
-    n_trades  = rr_trades.sum(axis=1)
+    txn_bidask = (bidask_cost_df * rr_trades).multiply(weight, axis=0).sum(axis=1)
+    txn_hedge  = (hedge_cost_df  * rr_trades).multiply(weight, axis=0).sum(axis=1)
+    txn_cost   = txn_bidask + txn_hedge
+    n_trades   = rr_trades.sum(axis=1)
 
     net_returns      = gross_returns - txn_cost
     cumulative_gross = (1 + gross_returns).cumprod()
@@ -459,6 +463,8 @@ def compute_portfolio_returns(
         "net_returns":      net_returns,
         "portfolio_value":  initial_capital * cumulative_net,
         "transaction_cost": txn_cost,
+        "txn_bidask":       txn_bidask,
+        "txn_hedge":        txn_hedge,
         "active_positions": n_active,
         "n_trades":         n_trades,
         "cumulative_gross": cumulative_gross,
@@ -640,6 +646,39 @@ def plot_results(
     ax.grid(True, alpha=0.3, axis="y")
     fig.tight_layout()
     fig.savefig(plot_dir / "annual_returns.png", dpi=150)
+    plt.close(fig)
+
+    # 8. Transaction cost breakdown: bid-ask vs delta hedge
+    fig, ax = plt.subplots(figsize=(12, 5))
+    metrics_df["txn_bidask"].cumsum().plot(ax=ax, label="Bid-ask spread", linewidth=1.5)
+    metrics_df["txn_hedge"].cumsum().plot(ax=ax, label="Delta hedge", linewidth=1.5)
+    metrics_df["transaction_cost"].cumsum().plot(ax=ax, label="Total", linewidth=1.5, linestyle="--", color="black")
+    ax.yaxis.set_major_formatter(mpl_ticker.PercentFormatter(xmax=1))
+    ax.set_title("Cumulative Transaction Cost: Bid-Ask Spread vs Delta Hedge")
+    ax.set_xlabel("Date")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(plot_dir / "txn_cost_breakdown.png", dpi=150)
+    plt.close(fig)
+
+    # 9. Annual Sharpe ratio
+    annual_sharpe = (
+        metrics_df["net_returns"]
+        .groupby(metrics_df["net_returns"].index.year)
+        .apply(lambda r: (r.mean() / r.std()) * np.sqrt(252) if r.std() > 0 else np.nan)
+    )
+    colors_sharpe = ["green" if s > 0 else "red" for s in annual_sharpe]
+    fig, ax = plt.subplots(figsize=(max(6, len(annual_sharpe) * 1.2), 4))
+    annual_sharpe.plot(kind="bar", ax=ax, color=colors_sharpe, edgecolor="black")
+    ax.axhline(0, color="black", linewidth=0.8)
+    ax.axhline(1, color="grey", linewidth=0.8, linestyle="--", label="Sharpe = 1")
+    ax.set_title("Annual Sharpe Ratio (Net Returns)")
+    ax.set_xlabel("Year")
+    ax.legend()
+    ax.grid(True, alpha=0.3, axis="y")
+    fig.tight_layout()
+    fig.savefig(plot_dir / "annual_sharpe.png", dpi=150)
     plt.close(fig)
 
     print(f"Plots saved → {plot_dir.resolve()}")
