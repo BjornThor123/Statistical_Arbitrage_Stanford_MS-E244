@@ -516,7 +516,7 @@ def compute_metrics(metrics_df: pd.DataFrame, risk_free_rate: float = 0.0) -> di
 
     results["Avg Active Pairs"]        = metrics_df["active_positions"].mean()
     results["Avg Daily RR Legs Traded"] = metrics_df["n_trades"].mean()
-    results["Total Transaction Cost"]   = metrics_df["transaction_cost"].sum()
+    results["Ann. Transaction Cost"]    = metrics_df["transaction_cost"].mean() * 252
 
     return results
 
@@ -680,15 +680,15 @@ def plot_results(
         .groupby(metrics_df["net_returns"].index.year)
         .apply(lambda r: (r.mean() / r.std()) * np.sqrt(252) if r.std() > 0 else np.nan)
     )
-    colors_sharpe = ["green" if s > 0 else "red" for s in annual_sharpe]
     fig, ax = plt.subplots(figsize=(max(6, len(annual_sharpe) * 1.2), 4))
-    annual_sharpe.plot(kind="bar", ax=ax, color=colors_sharpe, edgecolor="black")
+    annual_sharpe.plot(ax=ax, marker="o", linewidth=1.5, color="steelblue")
     ax.axhline(0, color="black", linewidth=0.8)
     ax.axhline(1, color="grey", linewidth=0.8, linestyle="--", label="Sharpe = 1")
     ax.set_title("Annual Sharpe Ratio (Net Returns)")
     ax.set_xlabel("Year")
+    ax.set_xticks(annual_sharpe.index)
     ax.legend()
-    ax.grid(True, alpha=0.3, axis="y")
+    ax.grid(True, alpha=0.3)
     fig.tight_layout()
     fig.savefig(plot_dir / "annual_sharpe.png", dpi=150)
     plt.close(fig)

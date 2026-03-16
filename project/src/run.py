@@ -19,15 +19,15 @@ METRICS_TO_STORE = [
     "Net Sharpe Ratio",
     "Net Ann. Return",
     "Net Max Drawdown",
-    "Total Transaction Cost",
+    "Ann. Transaction Cost",
 ]
 
 # Base parameter values (used when not the varying dimension)
 BASE_DELTA_TARGET         = 0.25
 BASE_TTE_TARGET           = 15
 BASE_TXN_COST_BPS         = 20
-BASE_ENTRY_THRESHOLD      = 0.95
-BASE_ENTRY_THRESHOLD_MODE = "absolute"
+BASE_ENTRY_THRESHOLD      = 0.975
+BASE_ENTRY_THRESHOLD_MODE = "percentile"
 BASE_SKEW_METHOD          = "direct"
 
 
@@ -47,6 +47,7 @@ def _run_one(
         delta_target=delta_target,
         entry_threshold_mode=entry_threshold_mode,
         entry_threshold=entry_threshold,
+        entry_threshold_pct=entry_threshold,
     )
     if skew_path is not None:
         kwargs["skew_path"] = skew_path

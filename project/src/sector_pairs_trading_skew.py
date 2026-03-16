@@ -616,7 +616,7 @@ def compute_metrics(metrics_df: pd.DataFrame, risk_free_rate: float = 0.0) -> di
 
     results["Avg Active Positions"]      = metrics_df["active_positions"].mean()
     results["Avg Daily RR Legs Traded"] = metrics_df["n_trades"].mean()
-    results["Total Transaction Cost"]   = metrics_df["transaction_cost"].sum()
+    results["Ann. Transaction Cost"]    = metrics_df["transaction_cost"].mean() * 252
 
     return results
 

@@ -9,8 +9,8 @@ class Config:
     skew_path: Path = Path("data/skew.parquet")
     cleaned_options_path: Path = Path("data/cleaned_options.parquet")
     plot_dir: Path = Path("plots")
-    start_date: datetime = datetime(2004, 1, 1)
-    end_date: datetime = datetime(2025, 12, 31)
+    start_date: datetime = datetime(2015, 1, 1)
+    end_date: datetime = datetime(2020, 12, 31)
     tte_target: int = 15
     max_tte: int = 30
     sector_ticker = "XLF"
@@ -20,7 +20,7 @@ class Config:
     #                  at level entry_threshold_pct (no lookahead)
     entry_threshold_mode: Literal["absolute", "percentile"] = "percentile"
     entry_threshold: float = 1.0          # used when mode == "absolute"
-    entry_threshold_pct: float = 0.95     # used when mode == "percentile"
+    entry_threshold_pct: float = 0.975    # used when mode == "percentile"
     estimation_window: int = 60
     signal_window: int = 60
     # Minimum fraction of the estimation/signal window required for rolling
@@ -41,7 +41,7 @@ class Config:
     #   ~200–500 bps of option value = typical bid-ask half-spread
     #   ~50–100 bps            = tight/liquid execution (e.g. market-maker access)
     #   ~10–30 bps             = very optimistic lower bound
-    transaction_cost_bps: float = 20
+    transaction_cost_bps: float = 20.0
     # Option transaction cost method:
     #   "spread" — use half the observed bid-ask spread per leg: 0.5*(call_spread+put_spread)/spot
     #   "bps"    — use transaction_cost_bps of the option mid-price: bps/10000*(call_mid+put_mid)/spot
