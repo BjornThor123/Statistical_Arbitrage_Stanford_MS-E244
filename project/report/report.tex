@@ -137,52 +137,32 @@ Another alternative that avoids reliance on interpolation or regression, is the 
 \end{equation}
 where $K_{\min}$ is the lowest available strike (deepest OTM put) and $K_{\max}$ is the highest available strike (deepest OTM call). This measure is conceptually similar to the direct skew but requires no delta interpolation; it captures the full tilt of the observed smile from endpoint to endpoint. However, the downside is that the most out of the money options tend to be noisy. 
 
-\subsection{Stage 2a: Sector-Based Idiosyncratic Skew}
-\label{sec:sector_strat}
-\begin{itemize}
-    \item \textcolor{red}{Remove sector-based (this is just a subset of the entire pairs trading strategy). Frame it as a complete pairs trading. We still need to define the skew.}
-    \item \textcolor{red}{Say that we test whether the series are cointegrated by using Engle-Granger and Johansen method, refer to appendix.}
-\end{itemize}
-
-The first approach strips out sector-wide skew dynamics by regressing each stock's skew on the XLF Financial Sector ETF skew using rolling OLS:
-\begin{equation}
-    \mathrm{Skew}_{i,t} = \alpha_i + \beta_i\,\mathrm{Skew}_{\mathrm{XLF},t}
-    + \varepsilon_{i,t}.
-    \label{eq:factor_model}
-\end{equation}
-Parameters $(\alpha_i, \beta_i)$ are re-estimated each day using only the preceding 60 trading days via the standard closed-form estimators:
-\[
-    \hat{\beta}_{i,t}
-    = \frac{\widehat{\mathrm{Cov}}_{60}(\mathrm{Skew}_i,\,\mathrm{Skew}_{\mathrm{XLF}})}
-           {\widehat{\mathrm{Var}}_{60}(\mathrm{Skew}_{\mathrm{XLF}})},
-    \qquad
-    \hat{\alpha}_{i,t} = \bar{S}_{i,t} - \hat{\beta}_{i,t}\,\bar{S}_{\mathrm{XLF},t}.
-\]
-The residual
-\[
-    \varepsilon_{i,t}
-    = \mathrm{Skew}_{i,t} - \hat{\alpha}_{i,t}
-      - \hat{\beta}_{i,t}\,\mathrm{Skew}_{\mathrm{XLF},t}
-\]
-represents the idiosyncratic component of skew: the part unexplained by the sector factor, interpreted as a transient mispricing of stock-specific tail risk. Rolling estimation ensures all parameters are computed using only information available at the time of trading.
-
-\subsection{Stage 2b: Complete Pairs Trading ($n^2$ Pairs)}
+\subsection{Stage 2: Pairs Trading}
 \label{sec:pairs_strat}
 
-The second approach does not rely on a single sector benchmark. Instead, every ordered pair of stocks $(i, j)$ in the universe defines its own spread:
+The idiosyncratic skew signal is constructed from a complete pairs trading framework. Let $\mathcal{U} = \{\text{BAC, C, BRK, JPM, SCHW, GS, XLF}\}$ be the asset universe, where XLF (the Financial Sector ETF) is included as a benchmark alongside the individual stocks. Every ordered pair $(i, j)$ with $i \neq j$ defines a cointegrating spread estimated by rolling OLS:
 \begin{equation}
     \varepsilon_{ij,t}
     = \mathrm{Skew}_{i,t} - \hat{\alpha}_{ij,t}
       - \hat{\beta}_{ij,t}\,\mathrm{Skew}_{j,t},
     \label{eq:pair_spread}
 \end{equation}
-where $\hat{\alpha}_{ij}$ and $\hat{\beta}_{ij}$ are again estimated by rolling 60-day OLS. For a universe of $n$ stocks this generates $n(n-1)$ directed pairs, each with its own mean-reverting spread. A signal on pair $(i,j)$ translates into a position on stock $i$ hedged against stock $j$: when
-$\varepsilon_{ij,t}$ is abnormally high, stock $i$'s skew is expensive relative to its historical relationship with stock $j$, and we sell the skew of $i$ while buying the skew of $j$.
+where the parameters are re-estimated each day on the preceding 60 trading days:
+\[
+    \hat{\beta}_{ij,t}
+    = \frac{\widehat{\mathrm{Cov}}_{60}(\mathrm{Skew}_i,\,\mathrm{Skew}_j)}
+           {\widehat{\mathrm{Var}}_{60}(\mathrm{Skew}_j)},
+    \qquad
+    \hat{\alpha}_{ij,t} = \bar{S}_{i,t} - \hat{\beta}_{ij,t}\,\bar{S}_{j,t}.
+\]
+For $|\mathcal{U}|=7$ assets this generates $7\times 6=42$ directed pairs. Including XLF naturally subsumes the ``sector-based'' approach as a special case: pairs of the form $(\text{stock}, \text{XLF})$ capture deviations of each stock's skew from the sector ETF, while stock-vs-stock pairs capture cross-sectional mispricings. When $\varepsilon_{ij,t}$ is abnormally large, stock $i$'s skew is expensive relative to its historical relationship with $j$, and we sell the skew of $i$ while buying the skew of $j$.
+
+Before committing to any pair, we verify that the skew series are cointegrated using both the Engle-Granger and Johansen tests; cointegration is a necessary condition for the spread to be stationary and thus mean-reverting. Full results are reported in Appendix~\ref{sec:cointegration_app}. All 21 unique stock pairs and all stock-vs-XLF combinations are cointegrated at the 1\% significance level, providing the econometric foundation for the strategy. Rolling estimation ensures all parameters use only information available at the time of trading.
 
 \subsection{Stage 3: Signal Construction}
 \label{sec:signal}
 
-Regardless of whether the residual $\varepsilon_{i,t}$ comes from the sector model (Section~\ref{sec:sector_strat}) or a stock pair (Section~\ref{sec:pairs_strat}), it is standardized into a rolling z-score:
+The residual $\varepsilon_{ij,t}$ from Section~\ref{sec:pairs_strat} is standardized into a rolling z-score:
 \begin{equation}
     z_{i,t}
     = \frac{\varepsilon_{i,t} - \mu_{\varepsilon_i,t}}{\sigma_{\varepsilon_i,t}},
@@ -199,10 +179,7 @@ where $\mu_{\varepsilon_i,t}$ and $\sigma_{\varepsilon_i,t}$ are the rolling 60-
     \label{eq:signal_threshold}
 \end{equation}
 
-\begin{itemize}
-    \item \textcolor{red}{We don't use hardcoded values anymore. We use percentiles and we use the 97.5th percentile both above and below. This is because we want to control how many trades we do and we don't want to assume normality.}
-\end{itemize}
-We experiment with a few different thresholds and in Section \ref{sec:results} we see that the results do not depend much on the threshold we choose. We use both hardcoded values and inferred values such as the 95th empirical percentile of the expanding distribution of $|z_{i,t}|$, computed without look-ahead. Here $s_{i,t} = +1$ means stock $i$'s idiosyncratic skew is abnormally high and we expect mean-reversion back toward zero; we sell the skew of $i$. Conversely, $s_{i,t} = -1$ means the skew is abnormally low and we buy it. 
+The threshold $z_{\mathrm{entry}}$ is set to the 97.5th percentile of the expanding empirical distribution of $|z_{ij,t}|$, applied symmetrically to both tails. Using an empirical percentile rather than a fixed numerical value means we do not need to assume that the idiosyncratic residuals are normally distributed, and it provides direct control over trade frequency regardless of how the spread volatility evolves over the sample. The expanding distribution is computed without look-ahead, using only observations up to and including day $t$. Here $s_{ij,t} = +1$ means stock $i$'s skew is abnormally high relative to $j$ and we expect mean-reversion; we sell the skew of $i$ and buy the skew of $j$. Conversely, $s_{ij,t} = -1$ means the spread is abnormally negative and we take the opposite position. We also experiment with more and less selective thresholds (95th and 99th percentiles) in Section~\ref{sec:results}.
 
 \textbf{Lookahead prevention.} To avoid any forward-looking bias, signals are executed with a one-day lag: a signal formed at the close of day $t$ is used to enter or exit positions at the open of day $t+1$. All rolling statistics (OLS coefficients, z-score moments) are computed using only past observations strictly available at the time the signal is generated.
 
@@ -213,7 +190,7 @@ Both strategies execute via the same instrument: a delta-hedged \emph{risk-rever
 \subsubsection{Leg Selection}
 For each (ticker, date) the legs are selected as follows:
 \begin{enumerate}
-    \item \textbf{OTM call.} Restrict to calls with $k \geq 0$ where $k$ is log moneyness (see Appendix \ref{sec:data_app}). Among these, find the maturity bucket closest to 15 days, then select the option whose delta is closest to $+0.25$. 
+    \item \textbf{OTM call.} Restrict to calls with $k \geq 0$ where $k$ is log moneyness. Among these, find the maturity bucket closest to 15 days, then select the option whose delta is closest to $+0.25$. 
     \item \textbf{OTM put.} Restrict to puts with $k < 0$. Apply the same maturity filter, then select the put whose absolute delta is closest to $0.25$.
 \end{enumerate}
 
@@ -262,27 +239,23 @@ where $N_t^{\mathrm{active}} = \sum_i \mathbf{1}[s_{i,t-1} \neq 0]$ is the numbe
 
 \subsubsection{Transaction Costs}
 
-\begin{itemize}
-    \item \textcolor{red}{This is not true, we use bps. Bid-ask spreads are extremely large causing the trading strategy to fail (refer to appendix). We therefore relax this assumption and use bps for options as well. Discuss that the bid-ask is too big to use and it would make our trading strategy not profitable. Also mention how far OTM options often have wider spreads due to lower volumes.}
-\end{itemize}
-
 Two components of transaction cost are applied whenever a position opens, closes, or reverses.
 
-\textbf{Options bid-ask spread.} Each risk reversal consists of two option
-legs. For each leg traded, the full bid-ask spread is charged as a cost:
+In principle the option leg cost should be the full bid-ask spread. However, as Appendix~\ref{sec:spread_app} shows, the bid-ask spread for near-dated OTM options in our universe averages between 100\% and 200\% of the option mid-price for most stocks. Far-OTM options are particularly illiquid and attract the widest spreads due to low volume and high adverse selection. Charging the full spread would trivially render the strategy unprofitable regardless of signal quality. Instead, we model both option legs and the equity delta-hedge as a flat $b$ basis points of spot price per trade, where $b = 20$ at the baseline. This represents a stylised but more tractable execution cost assumption, applicable when trading with institutional counterparties at tighter-than-quoted rates. We conduct a sensitivity analysis on $b$ in Section~\ref{sec:results}.
+
+\textbf{Option leg cost.} For each risk-reversal leg (call and put) traded:
 \begin{equation}
     c^{\mathrm{opt}}_{i,t}
-    = \bigl(\mathrm{ask}^{\mathrm{call}}_{i,t} - \mathrm{bid}^{\mathrm{call}}_{i,t}\bigr)
-    + \bigl(\mathrm{ask}^{\mathrm{put}}_{i,t}  - \mathrm{bid}^{\mathrm{put}}_{i,t}\bigr),
+    = 2 \times \frac{b}{10{,}000},
     \label{eq:opt_spread_cost}
 \end{equation}
-normalized by the spot price $S_{i,t}$ to convert to a return-equivalent.
+where the factor of 2 reflects the two legs of the risk reversal, normalized by spot price to a return equivalent.
 
-\textbf{Delta-hedge slippage.} The delta-hedge involves trading the underlying stock. We model equity execution costs as a flat 20 bps of the hedged notional:
+\textbf{Delta-hedge slippage.} Trading the underlying stock to neutralize net delta:
 \begin{equation}
     c^{\mathrm{hedge}}_{i,t}
     = \Delta^{\mathrm{net}}_{i,t-1}
-      \times \frac{20}{10{,}000}.
+      \times \frac{b}{10{,}000}.
     \label{eq:hedge_cost}
 \end{equation}
 
@@ -306,12 +279,9 @@ In Section \ref{sec:results} we report both gross (pre-cost) and net (post-cost)
 
 \subsection{Pairs Trading Strategy Performance}
 
-\begin{itemize}
-    \item \textcolor{red}{Figure \ref{fig:annual_returns} shows that we make a lot of money in some years. When we do loose money it is little and mostly due to transaction costs.}
-    \item \textcolor{red}{Figure \ref{fig:cumulative_returns} shows the cumulative return. We see that the strategy is quite stable with excpet from one sharp decrease in late 2018 / early 2019 and one sharp increase in 2020. For a breakdown of monthly returns see Appendix \ref{sec:more_results_app}. In December 2018 and January 2019 the SP\&500 fell sharply due to a sell-off and later recovered whihc most liekyl caused our strategy to perform poorly. The 2020 increase is due to hedging during covid.  This is not good as we would want our pnl to come from the mean reversion in skew and not due to hedging.}
-    \item \textcolor{red}{The annual Sharpe Ratio in Figure \ref{fig:annual_sharpe} also flcutuates which is to be expected when the annual returns fluctuates. This is noraml for a trading strategy but we wish to see a higher sharpe than this and a somwehat more stable sharep.}
-    \item \textcolor{red}{Our first trading strategy only included pairs wiht the secotr, not all individual stocks against all individual stocks. Figure \ref{fig:pnl_breakdown} shows that most of the return comes from the stock risk reversal. This means that the skew of the stocks tend to revert back to sector skew and not the other way around whihc is to be expected as well.}
-\end{itemize}
+Figures~\ref{fig:annual_returns} and~\ref{fig:cumulative_returns} give an overview of the return profile. The strategy generates positive annual returns in total (Figure~\ref{fig:annual_returns}); losses, where they occur, are modest and largely attributable to transaction costs rather than adverse signal realizations. The cumulative return path (Figure~\ref{fig:cumulative_returns}) is broadly stable, with two notable episodes. A sharp decline occurs in late 2018 and early 2019, coinciding with the broad S\&P~500 sell-off of December 2018 and the subsequent recovery in January 2019: a rapid market-wide move followed by a reversal is the type of regime most likely to confound a mean-reversion strategy whose rolling OLS parameters are calibrated on a prior 60 days of more normal conditions. A sharp increase occurs in early 2020, driven primarily by the COVID-19 volatility spike. Importantly, this gain is attributable largely to the delta-hedge component of the position (see Figure~\ref{fig:pnl_breakdown}) rather than skew mean-reversion, which is undesirable: we would prefer P\&L to come from the signal, not from directional equity exposure. For a full month-by-month breakdown see Appendix~\ref{sec:more_results_app}.
+
+The annual Sharpe ratio (Figure~\ref{fig:annual_sharpe}) fluctuates substantially from year to year. This is not unusual for statistical arbitrage strategies whose signal strength varies with market regimes, but the variability is larger than we would ideally want and reflects the sensitivity of the strategy to the COVID distortion period.
 
 \begin{figure}[h]
     \centering
@@ -348,13 +318,7 @@ In Section \ref{sec:results} we report both gross (pre-cost) and net (post-cost)
     \label{fig:sharpe_pnl}
 \end{figure}
 
-\begin{itemize}
-    \item \textcolor{red}{From Table \ref{tab:metrics} we see that the sharpe is almost all gone after accounting for trading costs}
-    \item \textcolor{red}{We do not have a high winrate}
-    \item \textcolor{red}{The net and gross volatility are the same as expected}
-    \item \textcolor{red}{We do about 1 trade a day and we loose more 44\% of total returns in transaction costs.}
-    \item \textcolor{red}{Table \ref{tab:metrics} also shows that the trading strategy has way fatter tails (high kurtosis) than what we would want. This is again something we can see from Figure \ref{fig:annual_returns}}
-\end{itemize}
+Table~\ref{tab:metrics} quantifies the performance. The gross Sharpe ratio of 1.05 is attractive, but costs reduce it to 0.24 on a net basis. The strategy retains a positive signal but barely covers its execution costs. The gross and net annualized volatility are nearly identical (9.6\% vs 9.5\%), confirming that transaction costs affect the mean return rather than the return variance, as expected. The win rate of 44.4\% gross (41.2\% net) is below 50\% and should not be interpreted as the strategy being wrong more often than right: with a fat-tailed return distribution (excess kurtosis $\approx 16.6$), the strategy profits through a small number of large-magnitude reversion events rather than frequent small gains. The skewness turns from slightly positive (0.03 gross) to slightly negative ($-0.16$ net), indicating that costs trim the small wins while the large losses remain. With an average of 1.3 risk-reversal legs traded per day, the annualized transaction cost of 7.4\% consumes about 73\% of the gross return, a stark illustration of how sensitive options-based strategies are to execution costs. Figure~\ref{fig:pnl_breakdown} shows that the majority of gross P\&L derives from the stock risk-reversal legs (rather than XLF legs), confirming that individual stock skews tend to revert toward the sector, not the other way around.
 
 \begin{table}[h]
 \centering
@@ -391,16 +355,12 @@ To assess how robust the results are to modeling choices, we vary some key param
 
 \subsubsection{Delta Target ($\Delta_{\mathrm{target}}$)}
 
-The baseline risk reversal targets the 25-delta strike on each leg. We re-run the backtest for $\Delta_{\mathrm{target}} \in \{0.15, 0.25, 0.50\}$. Lower delta targets correspond to more out-of-the-money legs with higher vega per unit of premium and greater sensitivity to skew movements, but also wider bid-ask spreads and sparser option availability. Higher delta targets move closer to at-the-money, reducing skew sensitivity but improving liquidity. 
-\begin{itemize}
-    \item \textcolor{red}{Choosing the delta is also a way to control how much we have to hedge and is therefore a cost driver. We want a delta that is out of the money to capture the skew, but not too much out of the money. }
-    \item \textcolor{red}{We see from the Table \ref{tab:delta_sens} that changing the delta changes the sharpe and other measures drastically. This might be because we use the 25-delta to calculate the skew. If we the other deltas we might get different results. Either way it indicates that our results are not that robust.}
-\end{itemize}
+The baseline risk reversal targets the 25-delta strike on each leg. We re-run the backtest for $\Delta_{\mathrm{target}} \in \{0.15, 0.25, 0.50\}$. The delta choice is also a cost lever: higher delta means a larger net delta to hedge, increasing equity execution cost. We want a strike far enough OTM to capture skew information, but not so far OTM that liquidity is poor and the hedge is large.
 
 
 \begin{table}[h]
 \centering
-\caption{Sensitivity to delta}
+\caption{Sensitivity to delta target.}
 \label{tab:delta_sens}
 \begin{tabular}{lrrr}
 \toprule
@@ -417,18 +377,15 @@ Value & 0.15 & 0.25 & 0.5 \\
 \end{tabular}
 \end{table}
 
+The 25-delta target performs best by a wide margin. Performance changes drastically across delta values, partly because we construct the skew signal using the 25-delta measure---switching to a different execution delta therefore introduces a mismatch between the signal and the traded instrument. Whether or not that mismatch explains all the variation, the sensitivity highlights that the results are not robust to this parameter choice, and that the 25-delta is the natural and internally consistent option.
 
 \subsubsection{Entry Threshold ($z_{\mathrm{entry}}$)}
 
 The entry threshold determines how extreme the idiosyncratic skew signal must be before a position is initiated. We sweep $z_{\mathrm{entry}} \in \{0.95, 0.975, 0.99\}$ (percentiles). A higher threshold admits fewer but higher-conviction trades, reducing transaction costs at the expense of lower capital utilization. A lower threshold increases trade frequency and diversification but may let in noisier signals.
-\begin{itemize}
-    \item \textcolor{red}{The gross sharp does not differ too much from in Table \ref{tab:entry_threshold_sens}. This might indicate some robustness}
-    \item \textcolor{red}{The net sharpe differ somewhat and is stronger the higher the threshold. Much of this comes from trading less as seen in the trading costs, but some also come from consistenyl choosing better trades.}
-\end{itemize}
 
 \begin{table}[h]
 \centering
-\caption{Sensitivity to entry threshold}
+\caption{Sensitivity to entry threshold (percentile of expanding $|z_{ij,t}|$ distribution).}
 \label{tab:entry_threshold_sens}
 \begin{tabular}{lrrr}
 \toprule
@@ -445,17 +402,15 @@ Value & 0.95 & 0.975 & 0.99 \\
 \end{tabular}
 \end{table}
 
+The gross Sharpe ratio does not vary dramatically across thresholds (1.26, 1.05, and 1.10), suggesting some robustness in the underlying signal quality. The net Sharpe, however, improves substantially with a tighter threshold: from 0.16 at the 95th percentile to 0.63 at the 99th. This improvement comes partly from simply trading less as total transaction costs fall from 0.60 to 0.23, but also from more selectively entering only the strongest-signal trades. The 99th-percentile variant also achieves a much more contained drawdown (8.5\% vs.\ 25.3\%), making it the most favourable risk-adjusted configuration.
+
 \subsubsection{Skew Metric}
 
-We compare all three skew measures defined in Section~\ref{sec:skew_extraction} on otherwise identical strategy configurations. 
-
-\begin{itemize}
-    \item \textcolor{red}{Sharpe nad other metrics highly dependent on skew metric. Polynomial is worst. This mihgt be natural as we trade based on the 25 deltas so you would expect caluclatning skew wrt to these yields best results. This still indicates not so robust reuslts}
-\end{itemize}
+We compare all three skew measures defined in Section~\ref{sec:skew_extraction} on otherwise identical strategy configurations.
 
 \begin{table}[h]
 \centering
-\caption{Sensitivity to skew method}
+\caption{Sensitivity to skew estimation method.}
 \label{tab:skew_method_sens}
 \begin{tabular}{lrrr}
 \toprule
@@ -472,14 +427,13 @@ Value & direct & polynomial & naive \\
 \end{tabular}
 \end{table}
 
+Performance is highly sensitive to the skew metric. The direct 25-delta measure is the only one that produces a positive net return. The polynomial skew yields a \emph{negative} gross Sharpe of $-0.53$, i.e. the signal is directionally wrong. This is the expected outcome: since we trade risk reversals at the 25-delta level, the direct skew measure is the most internally consistent choice. The polynomial coefficient is estimated from all available strikes and may be distorted by the noisy far-OTM options, which are precisely the strikes we exclude from the instrument. The endpoint (``naive'') measure performs better than the polynomial but is still unprofitable on a net basis, likely for similar reasons. Together, these results underscore that signal construction and instrument selection must be aligned.
+
 \subsubsection{Time to Expiration Target}
-\begin{itemize}
-    \item \textcolor{red}{Again, the performance metrics varies wildly indicating not robust results}
-\end{itemize}
 
 \begin{table}[h]
 \centering
-\caption{Sensitivity to tte}
+\caption{Sensitivity to time-to-expiry target (calendar days).}
 \label{tab:tte_sens}
 \begin{tabular}{lrrr}
 \toprule
@@ -496,15 +450,15 @@ Value & 15 & 20 & 25 \\
 \end{tabular}
 \end{table}
 
+Performance degrades monotonically as the target maturity increases. Transaction costs are roughly constant across maturities (the bps model does not depend on tenor), so the worsening net performance directly tracks the weakening gross signal. Near-dated options are more sensitive to short-lived demand imbalances and revert faster; longer-dated skew incorporates more structural, slow-moving information that does not revert on the timescale our strategy assumes. The 15-day tenor is the only configuration that survives costs, and even then only marginally.
+
 \subsubsection{Transaction Costs}
-\begin{itemize}
-    \item \textcolor{red}{Reiterate that we simplify to use bps instead of bid ask spreads.}
-    \item \textcolor{red}{The gross values are the same, the net values vary widely. Our strategy is not cost efficient. We do many trades and higher transaction cost hurt our strategy severely.}
-\end{itemize}
+
+As described in Section~\ref{sec:option_strat}, we model all execution costs (both option legs and equity hedge) as a flat $b$ basis points rather than the actual bid-ask spread, which is prohibitively wide (Appendix~\ref{sec:spread_app}).
 
 \begin{table}[h]
 \centering
-\caption{Sensitivity to txn cost bps}
+\caption{Sensitivity to execution cost assumption (bps applied to both option legs and equity hedge).}
 \label{tab:txn_cost_bps_sens}
 \begin{tabular}{lrrr}
 \toprule
@@ -521,30 +475,24 @@ Value & 0 & 20 & 40 \\
 \end{tabular}
 \end{table}
 
+Gross performance is identical regardless of the cost assumption, as it must be. At zero cost the strategy is strong (Sharpe 1.05). At 20\,bps the net Sharpe falls to 0.24. At 40\,bps the strategy is clearly unprofitable. The strategy is not cost-efficient: it trades frequently, and higher costs hurt it severely. See Figure \ref{fig:signals} in Appendix \ref{sec:more_results_app} for how much the base strategy trades. This is the central limitation of the approach as currently designed.
 
 % ---------------------------------------------------------------------------
 \section{Conclusion}
 \label{sec:conclusion}
-\begin{itemize}
-    \item \textcolor{red}{Weigh the options with open interest}
-    \item \textcolor{red}{Signature methods or other more sophisticated methods for estimating skew.}
-    \item \textcolor{red}{Factor models for separating known factors that cause skew and idiosyncratic skew}
-    \item \textcolor{red}{Emphasize that our results are not strong.}
-\end{itemize}
-
 % ---------------------------------------------------------------------------
 
-% TODO: Summarise key findings, limitations, and potential extensions.
-%
-% Suggested points:
-% - Did idiosyncratic skew exhibit mean-reversion over the sample period?
-% - How did the option strategy compare to the simpler spot proxy?
-% - Impact of transaction costs and the 2020 COVID volatility spike on results.
-% - Limitations: mid-price optimism (ignores bid-ask spread), no pin risk
-%   or early assignment modelling, single-sector universe, contract
-%   rolling not modelled explicitly.
-% - Extensions: SVI-based skew estimation, cross-sector universe,
-%   vega-neutral portfolio construction, dynamic entry threshold tuning.
+This paper asked whether idiosyncratic equity option skew is mean-reverting and whether that mean-reversion is large enough to trade profitably after costs. The honest answer is: the signal is real, but the results are not strong.
+
+Econometrically, the foundation is solid. All 21 unique skew pairs in our financial-sector universe are cointegrated at the 1\% significance level under both Engle-Granger and Johansen tests, establishing that idiosyncratic skew spreads are stationary. The gross strategy performance bears this out: a Sharpe ratio of 1.05 and a cumulative return of 78.3\% over 2018--2022 at the 25-delta, 15-day baseline. However, once we account for transaction costs, even at the modest 20\,bps stylised assumption rather than the actual bid-ask spread, which averages 100--200\% of option mid-prices, the net Sharpe collapses to 0.24 and the net return to 2.3\%. The strategy breaks even around 25\,bps.
+
+The sensitivity analysis reinforces the fragility of the results. Sharpe ratios and drawdowns change drastically with the delta target, time-to-expiry, and skew metric. Only the direct 25-delta measure produces a positive net return; the polynomial skew produces a \emph{negative} gross Sharpe, demonstrating that poor signal construction can actively destroy value. The one robust finding across all sensitivity dimensions is that tighter entry thresholds consistently improve net performance by reducing unnecessary turnover: the 99th-percentile threshold achieves a net Sharpe of 0.63 with a drawdown of only 8.5\%. The strategy also benefits disproportionately from the COVID volatility episode of 2020, whose gains come largely from the delta hedge rather than from skew mean-reversion, an undesirable source of return.
+
+\paragraph{Limitations.}
+Several aspects of our setup are likely to flatter the backtest. We price all trades at mid, which is typically unachievable; using the actual bid and ask for each leg would imply costs far exceeding our bps model. We model only one sector with six stocks, limiting both the diversification of the strategy and the generalisability of the conclusions. Contract rolling is not modelled: we implicitly assume a given option chain is available every day, whereas in practice new expiries must be initiated and the transition entails additional costs. Options near expiry are subject to pin risk and delta blowup not captured by our daily rehedge. Finally, clipping implied volatility at the daily 90th percentile is an ad hoc choice that removes genuine stress signals alongside noise.
+
+\paragraph{Extensions.}
+The most impactful improvements would directly address the cost problem. Weighting options by open interest when constructing the skew measure would concentrate signal in the most liquid strikes, reducing noise and improving signal consistency. SVI (stochastic volatility inspired) parametrisation \cite{gatheral2014} provides an arbitrage-free smile interpolation and a principled way to extract skew without fitting to illiquid endpoints. A multi-factor decomposition of the systematic component of skew, separating market-wide fear, sector demand, and firm-specific components, would sharpen idiosyncratic isolation beyond the single-factor OLS regression. More ambitiously, constructing a vega-neutral rather than notional-equal-weighted portfolio would control overall volatility exposure and reduce unintended exposure to realised variance, particularly during stress periods.
 
 \newpage
 \bibliographystyle{plain}
