@@ -20,7 +20,7 @@ class Config:
     #                  at level entry_threshold_pct (no lookahead)
     entry_threshold_mode: Literal["absolute", "percentile"] = "percentile"
     entry_threshold: float = 1.0          # used when mode == "absolute"
-    entry_threshold_pct: float = 0.975    # used when mode == "percentile"
+    entry_threshold_pct: float = 0.975   # used when mode == "percentile"
     estimation_window: int = 60
     signal_window: int = 60
     # Minimum fraction of the estimation/signal window required for rolling
@@ -28,7 +28,7 @@ class Config:
     # stale pre-gap data from contaminating post-gap estimates while still
     # allowing computation when a few observations are missing.
     min_periods_frac: float = 0.5
-    exit_threshold: float = 0.0
+    exit_threshold: float = 0
     delta_target: float = 0.25
     # Skew measure used for signal construction.
     # "direct"     — IV_25Δ_put − IV_25Δ_call at tte_target (matches the traded instrument)

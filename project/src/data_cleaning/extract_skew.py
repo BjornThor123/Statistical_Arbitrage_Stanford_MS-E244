@@ -307,14 +307,17 @@ def extract_skew_df(
 
 
 def main():
-    loader = DataLoader(data_path=config.data_path)
+    # loader = DataLoader(data_path=config.data_path)
 
-    query = (
-        f"SELECT {', '.join(config.relevant_option_columns)} FROM options_enriched"
-        f" WHERE date >= '{config.start_date}' AND date <= '{config.end_date}'"
-        f" AND tte_days <= {config.max_tte}"
-    )
-    df = loader.query(query)
+    # query = (
+    #     f"SELECT {', '.join(config.relevant_option_columns)} FROM options_enriched"
+    #     f" WHERE date >= '{config.start_date}' AND date <= '{config.end_date}'"
+    #     f" AND tte_days <= {config.max_tte}"
+    # )
+    # df = loader.query(query)
+    path = "/Users/bjorn/Projects/Trading/StatArb/Statistical_Arbitrage_Stanford_MS-E244/project/data/data_for_bjorn.parquet"
+    df = pd.read_parquet(path)
+    
 
     skew_df, cleaned_options_df = extract_skew_df(
         df,

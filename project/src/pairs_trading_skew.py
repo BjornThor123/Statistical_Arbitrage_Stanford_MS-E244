@@ -484,6 +484,208 @@ def compute_portfolio_returns(
     })
 
 
+def compute_portfolio_returns_drill(
+    signals: pd.DataFrame,
+    betas: pd.DataFrame,
+    pairs: List[Tuple[str, str]],
+    stock_rr_legs: pd.DataFrame,
+    initial_capital: float = config.initial_capital,
+    max_position_frac: float = config.max_position_frac,
+    transaction_cost_bps: float = config.transaction_cost_bps,
+    option_cost_mode: str = config.option_cost_mode,
+    pnl_drill_path: Path | str = Path("data/pnl_drill.parquet"),
+) -> pd.DataFrame:
+    """
+    Identical to compute_portfolio_returns but also saves a long-format
+    per-(date, pair) drill-down dataset to pnl_drill_path.
+
+    Each row in the drill file represents one pair on one day and contains
+    every intermediate P&L component:
+
+        pair, ticker_i, ticker_j
+        signal, beta, weight, rr_trades
+        i_opt_ret, i_hedge_ret       — i-leg option and delta-hedge returns
+        j_opt_ret, j_hedge_ret       — j-leg option and delta-hedge returns
+        pair_gross_ret               — sum of four legs
+        txn_bidask, txn_hedge        — transaction costs (after trade multiplier)
+        txn_total
+        pair_net_ret                 — pair_gross_ret − txn_total
+        pair_wtd_gross, pair_wtd_net — weighted by portfolio weight
+        spot_i, spot_j, d_spot_i, d_spot_j
+        rr_i, rr_j, d_rr_i, d_rr_j
+        delta_i, delta_j             — lagged net deltas
+    """
+    # ── Pivot single-stock series ─────────────────────────────────────────────
+    rr    = stock_rr_legs["rr_value"].unstack("ticker")
+    spot  = stock_rr_legs["spot_price"].unstack("ticker")
+    delta = stock_rr_legs["net_delta"].unstack("ticker")
+
+    for df_ in (rr, spot, delta):
+        df_.index = pd.to_datetime(df_.index)
+
+    needed_tickers = sorted({t for pair in pairs for t in pair})
+    available = [t for t in needed_tickers if t in rr.columns]
+
+    common_idx = (
+        signals.index
+        .intersection(rr.index)
+        .intersection(spot.index)
+    )
+
+    signals_a  = signals.reindex(common_idx)
+    betas_a    = betas.reindex(common_idx)
+    rr_a       = rr.reindex(common_idx)[available]
+    spot_a     = spot.reindex(common_idx)[available]
+    delta_a    = delta.reindex(common_idx)[available]
+
+    d_rr       = rr_a.diff()
+    d_spot     = spot_a.diff()
+    spot_prev  = spot_a.shift(1)
+    delta_prev = delta_a.shift(1)
+
+    # Weight depends only on signals — compute once before the pair loop
+    lagged_signal = signals_a.shift(1)
+    n_active = (lagged_signal != 0).sum(axis=1)
+    weight   = np.minimum(1.0 / n_active.replace(0, np.nan), max_position_frac)
+
+    # Trade-event multipliers (entry=1, exit=1, flip=2)
+    prev_sig  = signals_a.shift(1).fillna(0).astype(int)
+    entering  = (signals_a != 0) & (prev_sig == 0)
+    exiting   = (signals_a == 0) & (prev_sig != 0)
+    flipping  = (signals_a != 0) & (prev_sig != 0) & (signals_a != prev_sig)
+    rr_trades = entering.astype(float) + exiting.astype(float) + flipping.astype(float) * 2
+
+    # ── Transaction cost helpers ──────────────────────────────────────────────
+    if option_cost_mode == "spread":
+        opt_ca = stock_rr_legs["call_spread"].unstack("ticker")
+        opt_pb = stock_rr_legs["put_spread"].unstack("ticker")
+        for df_ in (opt_ca, opt_pb):
+            df_.index = pd.to_datetime(df_.index)
+        opt_ca = opt_ca.reindex(common_idx)[available]
+        opt_pb = opt_pb.reindex(common_idx)[available]
+        def _opt_cost(ticker):  # noqa: E306
+            return 0.5 * (opt_ca[ticker] + opt_pb[ticker]) / spot_a[ticker]
+    elif option_cost_mode == "bps":
+        opt_ca = stock_rr_legs["call_mid"].unstack("ticker")
+        opt_pb = stock_rr_legs["put_mid"].unstack("ticker")
+        for df_ in (opt_ca, opt_pb):
+            df_.index = pd.to_datetime(df_.index)
+        opt_ca = opt_ca.reindex(common_idx)[available]
+        opt_pb = opt_pb.reindex(common_idx)[available]
+        def _opt_cost(ticker):  # noqa: E306
+            return (transaction_cost_bps / 10_000) * (opt_ca[ticker] + opt_pb[ticker]) / spot_a[ticker]
+    else:
+        raise ValueError(f"Unknown option_cost_mode: {option_cost_mode!r}. Use 'spread' or 'bps'.")
+
+    # ── Per-pair loop — returns, costs, drill records ─────────────────────────
+    pair_ret_df    = pd.DataFrame(0.0, index=common_idx, columns=signals_a.columns)
+    bidask_cost_df = pd.DataFrame(0.0, index=common_idx, columns=signals_a.columns)
+    hedge_cost_df  = pd.DataFrame(0.0, index=common_idx, columns=signals_a.columns)
+    drill_frames: list[pd.DataFrame] = []
+
+    for a, b in pairs:
+        key = _pair_key(a, b)
+        if key not in signals_a.columns or a not in available or b not in available:
+            continue
+
+        sig      = signals_a[key].shift(1)
+        beta     = betas_a[key].shift(1)
+        beta_abs = beta.abs()
+        trades   = rr_trades[key]
+
+        # Return components
+        i_opt   =  sig * d_rr[a] / spot_prev[a]
+        i_hedge = -sig * delta_prev[a] * d_spot[a] / spot_prev[a]
+        j_opt   = -sig * beta * d_rr[b] / spot_prev[b]
+        j_hedge =  sig * beta * delta_prev[b] * d_spot[b] / spot_prev[b]
+        gross   = i_opt + i_hedge + j_opt + j_hedge
+
+        # Cost components (unit = per one "trade event")
+        ba_cost_unit = _opt_cost(a) + beta_abs * _opt_cost(b)
+        hg_cost_unit = (
+            (transaction_cost_bps / 10_000) * delta_prev[a].abs()
+            + beta_abs * (transaction_cost_bps / 10_000) * delta_prev[b].abs()
+        )
+        ba_traded = ba_cost_unit * trades
+        hg_traded = hg_cost_unit * trades
+        txn_total = ba_traded + hg_traded
+        net       = gross - txn_total
+
+        # Store unweighted costs for portfolio aggregation (matches original)
+        pair_ret_df[key]    = gross
+        bidask_cost_df[key] = ba_cost_unit
+        hedge_cost_df[key]  = hg_cost_unit
+
+        # Drill frame for this pair
+        drill_frames.append(pd.DataFrame({
+            "pair":          key,
+            "ticker_i":      a,
+            "ticker_j":      b,
+            "signal":        sig,
+            "beta":          beta,
+            "weight":        weight,
+            "rr_trades":     trades,
+            "i_opt_ret":     i_opt,
+            "i_hedge_ret":   i_hedge,
+            "j_opt_ret":     j_opt,
+            "j_hedge_ret":   j_hedge,
+            "pair_gross_ret": gross,
+            "txn_bidask":    ba_traded,
+            "txn_hedge":     hg_traded,
+            "txn_total":     txn_total,
+            "pair_net_ret":  net,
+            "pair_wtd_gross": gross * weight,
+            "pair_wtd_net":  net * weight,
+            "spot_i":        spot_a[a],
+            "spot_j":        spot_a[b],
+            "d_spot_i":      d_spot[a],
+            "d_spot_j":      d_spot[b],
+            "rr_i":          rr_a[a],
+            "rr_j":          rr_a[b],
+            "d_rr_i":        d_rr[a],
+            "d_rr_j":        d_rr[b],
+            "delta_i":       delta_prev[a],
+            "delta_j":       delta_prev[b],
+        }, index=common_idx))
+
+    # ── Save drill dataset ────────────────────────────────────────────────────
+    drill_df = (
+        pd.concat(drill_frames)
+        .rename_axis("date")
+        .reset_index()
+        .sort_values(["date", "pair"])
+        .reset_index(drop=True)
+    )
+    pnl_drill_path = Path(pnl_drill_path)
+    pnl_drill_path.parent.mkdir(parents=True, exist_ok=True)
+    drill_df.to_parquet(pnl_drill_path, index=False)
+    print(f"Drill P&L saved → {pnl_drill_path.resolve()}")
+
+    # ── Portfolio aggregation (identical to compute_portfolio_returns) ─────────
+    gross_returns = pair_ret_df.multiply(weight, axis=0).sum(axis=1)
+    txn_bidask    = (bidask_cost_df * rr_trades).multiply(weight, axis=0).sum(axis=1)
+    txn_hedge     = (hedge_cost_df  * rr_trades).multiply(weight, axis=0).sum(axis=1)
+    txn_cost      = txn_bidask + txn_hedge
+    n_trades      = rr_trades.sum(axis=1)
+
+    net_returns      = gross_returns - txn_cost
+    cumulative_gross = (1 + gross_returns).cumprod()
+    cumulative_net   = (1 + net_returns).cumprod()
+
+    return pd.DataFrame({
+        "gross_returns":    gross_returns,
+        "net_returns":      net_returns,
+        "portfolio_value":  initial_capital * cumulative_net,
+        "transaction_cost": txn_cost,
+        "txn_bidask":       txn_bidask,
+        "txn_hedge":        txn_hedge,
+        "active_positions": n_active,
+        "n_trades":         n_trades,
+        "cumulative_gross": cumulative_gross,
+        "cumulative_net":   cumulative_net,
+    })
+
+
 # ── Performance metrics ───────────────────────────────────────────────────────
 
 def compute_metrics(metrics_df: pd.DataFrame, risk_free_rate: float = 0.0) -> dict:
@@ -715,7 +917,15 @@ def run_backtest(
     """Run the full backtest: simulate returns → metrics → plots."""
     print("Running backtest...")
 
-    metrics_df = compute_portfolio_returns(
+    # metrics_df = compute_portfolio_returns(
+    #     signals, betas, pairs, stock_rr_legs,
+    #     initial_capital=initial_capital,
+    #     max_position_frac=max_position_frac,
+    #     transaction_cost_bps=transaction_cost_bps,
+    #     option_cost_mode=option_cost_mode,
+    # )
+    
+    metrics_df = compute_portfolio_returns_drill(
         signals, betas, pairs, stock_rr_legs,
         initial_capital=initial_capital,
         max_position_frac=max_position_frac,
