@@ -1,18 +1,52 @@
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Literal
 from datetime import datetime
 from pathlib import Path
 
 @dataclass(frozen=True)
 class Config:
-    data_path: Path = Path("project/data")
-    plot_dir: Path = Path("project/plots")
-    start_date: datetime = datetime(2014, 1, 1)
-    end_date: datetime = datetime(2018, 12, 31)
+    data_path: Path = Path("data")
+    skew_path: Path = Path("data/skew.parquet")
+    cleaned_options_path: Path = Path("data/cleaned_options.parquet")
+    plot_dir: Path = Path("plots")
+    start_date: datetime = datetime(2015, 1, 1)
+    end_date: datetime = datetime(2020, 12, 31)
+    tte_target: int = 15
     max_tte: int = 30
     sector_ticker = "XLF"
-    entry_threshold: float = 2.0
-    exit_threshold: float = 0.5
+    # Entry threshold mode:
+    #   "absolute"   — enter when |z| > entry_threshold (fixed z-score value)
+    #   "percentile" — enter when z exceeds its expanding empirical quantile
+    #                  at level entry_threshold_pct (no lookahead)
+    entry_threshold_mode: Literal["absolute", "percentile"] = "percentile"
+    entry_threshold: float = 1.0          # used when mode == "absolute"
+    entry_threshold_pct: float = 0.975   # used when mode == "percentile"
+    estimation_window: int = 60
+    signal_window: int = 60
+    # Minimum fraction of the estimation/signal window required for rolling
+    # calculations (beta, spread mean/std).  Values in [0.5, 0.75] prevent
+    # stale pre-gap data from contaminating post-gap estimates while still
+    # allowing computation when a few observations are missing.
+    min_periods_frac: float = 0.5
+    exit_threshold: float = 0
+    delta_target: float = 0.25
+    # Skew measure used for signal construction.
+    # "direct"     — IV_25Δ_put − IV_25Δ_call at tte_target (matches the traded instrument)
+    # "polynomial" — −β from IV = α + β·log(K/F) + γ·log(K/F)² (negated so high = puts expensive)
+    skew_method: Literal["naive", "logmoneyness", "direct", "vega_hedged", "gamma_hedged","polynomial"] = "direct"
+    initial_capital: float = 1_000_000.0
+    # Transaction cost in bps of the total option mid-price (call + put) per RR leg traded.
+    # Costs are applied proportionally to option value, not stock price.
+    # Rough real-world calibration for single-name equity options:
+    #   ~200–500 bps of option value = typical bid-ask half-spread
+    #   ~50–100 bps            = tight/liquid execution (e.g. market-maker access)
+    #   ~10–30 bps             = very optimistic lower bound
+    transaction_cost_bps: float = 20.0
+    # Option transaction cost method:
+    #   "spread" — use half the observed bid-ask spread per leg: 0.5*(call_spread+put_spread)/spot
+    #   "bps"    — use transaction_cost_bps of the option mid-price: bps/10000*(call_mid+put_mid)/spot
+    option_cost_mode: Literal["spread", "bps"] = "bps"
+    max_position_frac: float = 0.20
 
     relevant_option_columns: List[str] = field(default_factory=lambda: [
         "secid",

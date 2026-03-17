@@ -16,3 +16,4 @@ data/relevant_data/*
 *.zip
 project/stat_arb.egg-info/*
 *.pyc
+*.png
